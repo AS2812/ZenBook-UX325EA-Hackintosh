@@ -200,9 +200,12 @@ if [ "$HAS_WIN" = 1 ] && [ ! -f "$TGT_MNT/EFI/Microsoft/Boot/bootmgfw.efi" ]; th
 fi
 
 if [ "$LAUNCHER_FULL" = 1 ]; then
-    /usr/libexec/PlistBuddy -c "Set :Misc:Boot:LauncherOption Full" "$TGT_MNT/EFI/OC/config.plist" \
-        && say "SSD copy: LauncherOption=Full (USB copy unchanged)." \
-        || warn "Could not set LauncherOption on the SSD copy."
+    # every profile on the SSD, so --gpu-off / --gpu-keep keep the firmware "OpenCore" entry
+    for CFG in "$TGT_MNT"/EFI/OC/config*.plist; do
+        /usr/libexec/PlistBuddy -c "Set :Misc:Boot:LauncherOption Full" "$CFG" \
+            && say "SSD copy: LauncherOption=Full in $(basename "$CFG") (USB copy unchanged)." \
+            || warn "Could not set LauncherOption in $(basename "$CFG")."
+    done
 fi
 say "Verified: SSD EFI/OC and EFI/BOOT match the USB byte-for-byte."
 cleanup

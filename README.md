@@ -92,8 +92,14 @@ extras/config-gpu-debug.plist      GPU profile with verbose boot + display traci
    - `sh fix-hardware.sh --gpu-test` → restart. The guard boots the GPU profile **once**;
      if the screen stays black it records diagnostics and restarts into the safe profile
      automatically. If the screen works, click **Keep**, then run `--gpu-keep`.
-7. Optional: `sudo sh sync-efi-to-ssd.sh --dry-run`, then without `--dry-run`, to boot
-   without the USB.
+7. Boot like a real Mac, without the USB:
+   - System Settings → General → **Startup Disk** → choose macOS → Restart (sets the default);
+   - `sudo sh sync-efi-to-ssd.sh --launcher-full` (try `--dry-run` first) copies the EFI to the
+     internal SSD and keeps `\EFI\Microsoft` untouched;
+   - shut down, unplug the USB, power on tapping **Esc** and pick the internal SSD entry once —
+     OpenCore registers itself as the first firmware boot option.
+   The boot menu is hidden (`ShowPicker=false`): power on → Apple logo → macOS. Hold
+   **Option (Alt)** at power-on for the menu (Windows, recovery, rescue).
 
 Rollback at any time: `fix-hardware.sh --gpu-off`, or double-click `GPU-OFF.command` from
 another Mac.

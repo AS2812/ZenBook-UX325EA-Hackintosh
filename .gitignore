@@ -1,0 +1,8 @@
+.DS_Store
+._*
+*.pkg
+usb-kit/UX325EA-RESCUE/TEST-RESULTS/
+usb-kit/UX325EA-RESCUE/BACKUPS/
+src/WhateverXe-UX325/extracted.inc
+src/WhateverXe-UX325/harness
+src/ZenBookHelper/ZenBookHelper.app/

@@ -1,0 +1,3 @@
+Place WhateverXe-Graphics-0.4.4.pkg here (download it from https://github.com/b00t0x/WhateverXe/releases).
+It is not included in this repository because it contains Apple binaries.
+fix-hardware.sh --gpu-test offers to install it from this folder.

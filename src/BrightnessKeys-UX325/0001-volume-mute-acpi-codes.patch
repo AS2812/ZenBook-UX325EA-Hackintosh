@@ -1,0 +1,52 @@
+diff --git a/BrightnessKeys/BrightnessKeys.cpp b/BrightnessKeys/BrightnessKeys.cpp
+index 219fca5..8911d91 100644
+--- a/BrightnessKeys/BrightnessKeys.cpp
++++ b/BrightnessKeys/BrightnessKeys.cpp
+@@ -282,6 +282,35 @@ IOReturn BrightnessKeys::_panelNotification(void *target, void *refCon, UInt32 m
+                     DBGLOG("brkeys", "%s ACPI brightness down", provider->getName());
+                     break;
+                     
++                // UX325EA: volume up / down / mute sent by SSDT-WAKE (ASUS ATK codes 0x30/0x31/0x32)
++                // instead of the ATK queue, which stops delivering them to AsusSMC after sleep.
++                // Same delivery as brightness: PS/2 keyboard ADB 0x48/0x49/0x4a = NX sound up/down/mute.
++                case 0x90:
++                case 0x91:
++                case 0x92: {
++                    const unsigned adb = arg == 0x90 ? 0x48 : arg == 0x91 ? 0x49 : 0x4a;
++                    info.adbKeyCode = adb;
++                    info.eatKey = false;
++                    info.goingDown = true;
++                    clock_get_uptime(&info.time);
++                    self->dispatchMessage(kPS2M_notifyKeyTime, &info.time);
++                    self->dispatchMessage(kPS2K_notifyKeystroke, &info);
++                    if (info.eatKey) {
++                        info.eatKey = false;
++                        info.goingDown = false;
++                        clock_get_uptime(&info.time);
++                        self->dispatchMessage(kPS2K_notifyKeystroke, &info);
++                    } else {
++                        clock_get_uptime(&info.time);
++                        self->dispatchKeyboardEventX(adb, true, info.time);
++                        clock_get_uptime(&info.time);
++                        self->dispatchKeyboardEventX(adb, false, info.time);
++                    }
++                    self->setProperty("UX325VolumeKeys", ++self->_ux325Keys, 32);
++                    DBGLOG("brkeys", "%s ACPI volume/mute key 0x%02x -> adb 0x%02x", provider->getName(), arg, adb);
++                    return kIOReturnSuccess;
++                }
++
+                 case kIOACPIMessageBrightnessCycle:
+                 case kIOACPIMessageBrightnessZero:
+                 case kIOACPIMessageBrightnessOff:
+diff --git a/BrightnessKeys/BrightnessKeys.hpp b/BrightnessKeys/BrightnessKeys.hpp
+index 8aedffa..1018b85 100644
+--- a/BrightnessKeys/BrightnessKeys.hpp
++++ b/BrightnessKeys/BrightnessKeys.hpp
+@@ -36,6 +36,7 @@ private:
+     IOACPIPlatformDevice *      _panelFallback {nullptr};
+     IOACPIPlatformDevice *      _panelDiscrete {nullptr};
+     bool                        _panelNotified {false};
++    uint32_t                    _ux325Keys {0};
+     IONotifier *                _panelNotifiers {nullptr};
+     IONotifier *                _panelNotifiersFallback {nullptr};
+     IONotifier *                _panelNotifiersDiscrete {nullptr};

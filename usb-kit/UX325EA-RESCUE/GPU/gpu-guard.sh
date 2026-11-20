@@ -12,8 +12,8 @@ MODE="$(cat "$D/gpu-mode" 2>/dev/null)"; MODE="${MODE:-off}"
 log()   { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 pinfo() { diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
 
-restore_stable() {          # every OpenCore partition currently in GPU state -> stable
-    local found=0 d mp mine
+restore_profile() {         # restore_profile SRC MATCH: config.plist == config-MATCH -> copy config-SRC over it
+    local src="$1" match="$2" found=0 d mp mine
     for d in $(diskutil list 2>/dev/null | awk '{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$'); do
         [ "$(pinfo "$d" FilesystemType)" = "msdos" ] || continue
         mp="$(pinfo "$d" MountPoint)"; mine=0
@@ -21,13 +21,13 @@ restore_stable() {          # every OpenCore partition currently in GPU state ->
             diskutil mount -mountOptions nobrowse "$d" >/dev/null 2>&1 || continue
             mp="$(pinfo "$d" MountPoint)"; mine=1
         fi
-        if [ -f "$mp/EFI/OC/config-stable.plist" ] && [ -f "$mp/EFI/OC/config-gpu.plist" ]; then
+        if [ -f "$mp/EFI/OC/config-$src.plist" ] && [ -f "$mp/EFI/OC/config-$match.plist" ]; then
             found=1
-            if cmp -s "$mp/EFI/OC/config.plist" "$mp/EFI/OC/config-gpu.plist"; then
-                /bin/cp "$mp/EFI/OC/config-stable.plist" "$mp/EFI/OC/config.plist" && sync \
-                    && log "$d: stable OpenCore config restored - the next boot is the normal setup"
+            if cmp -s "$mp/EFI/OC/config.plist" "$mp/EFI/OC/config-$match.plist"; then
+                /bin/cp "$mp/EFI/OC/config-$src.plist" "$mp/EFI/OC/config.plist" && sync \
+                    && log "$d: config-$src restored over config-$match - the next boot is the normal setup"
             else
-                log "$d: already on the stable config"
+                log "$d: config.plist is not config-$match - nothing to restore"
             fi
         fi
         [ "$mine" = 1 ] && diskutil unmount "$d" >/dev/null 2>&1
@@ -98,9 +98,13 @@ capture_diag() {            # full picture once the system has settled (~150 s)
     to_usb "$out"
 }
 
-if [ "$MODE" = "test" ]; then
-    log "GPU test boot started"
-    for i in $(seq 1 45); do restore_stable && break; sleep 2; done
+restore_stable() { restore_profile stable gpu; }
+
+if [ "$MODE" = "test" ] || [ "$MODE" = "trial" ]; then
+    log "GPU $MODE boot started"
+    # trial: the previous daily profile (saved as config-prev) comes back; test: the stable one
+    if [ "$MODE" = "trial" ]; then RESTORE="restore_profile prev trial"; else RESTORE="restore_stable"; fi
+    for i in $(seq 1 45); do $RESTORE && break; sleep 2; done
     echo off > "$D/gpu-mode"
     early_capture
     capture_diag

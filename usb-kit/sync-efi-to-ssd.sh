@@ -19,7 +19,7 @@
 #  3. v1 checked '[ -d /Volumes/SSD_EFI ]' after it had already created that directory
 #     itself, so a failed mount still counted as success. v2 checks the real mount point.
 #  4. v1 put a full EFI backup inside the 200 MB ESP on every run, so it filled up.
-#     v2 backs up to the USB (UX325EA-RESCUE/BACKUPS), falling back to /Users/Shared.
+#     v2.1 backs up to /Users/Shared/UX325EA-EFI-Backups on the laptop (USB space is small).
 #  5. v1 hard-coded disk6s1/disk2s1. v2 identifies disks by properties and refuses to run
 #     on Apple Silicon or when source and target are on the same disk.
 #  6. v2 verifies the copy with diff -r before it reports success.
@@ -161,8 +161,9 @@ fi
 # 4. Backup of the SSD EFI (stored OUTSIDE the ESP)
 # ------------------------------------------------------------------------------
 TS="$(date +%Y%m%d-%H%M%S)"
-BK_ROOT="$SCRIPT_DIR/UX325EA-RESCUE/BACKUPS"
-[ -d "$BK_ROOT" ] && [ -w "$BK_ROOT" ] || BK_ROOT="/Users/Shared/UX325EA-EFI-Backups"
+# v2.1: keep the (70-90 MB) SSD EFI backup on the laptop - the USB data partition is small
+BK_ROOT="/Users/Shared/UX325EA-EFI-Backups"; mkdir -p "$BK_ROOT" 2>/dev/null
+[ -d "$BK_ROOT" ] && [ -w "$BK_ROOT" ] || BK_ROOT="$SCRIPT_DIR/UX325EA-RESCUE/BACKUPS"
 BK="$BK_ROOT/SSD-ESP-$TS"
 mkdir -p "$BK" || die "Cannot create backup folder $BK"
 if [ -d "$TGT_MNT/EFI" ]; then

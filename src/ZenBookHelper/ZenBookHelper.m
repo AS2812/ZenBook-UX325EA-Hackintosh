@@ -10,8 +10,8 @@
 //                                LED grid via HID feature report 0x0D, taps on the grid type
 //                                keypad keys (layout up5401ea), hold top-left icon = LED level.
 // CLI:
-//   up | down | set <5-100> | status | mode <overlay|gamma|auto> | hud <on|off>
-//   twofinger <left|right> | numpad <on|off|toggle|probe> | selftest
+//   up | down | set <5-100> | status | mode <overlay|gamma|auto> | native <on|off> | hud <on|off>
+//   twofinger <left|right> | numpad <on|off|toggle|probe> | powerbutton <sleep|off> | selftest
 //
 // Build (universal):  see build.sh next to this file.
 #import <Cocoa/Cocoa.h>
@@ -22,14 +22,17 @@
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/graphics/IOGraphicsLib.h>
 #import <CoreWLAN/CoreWLAN.h>
+#import <CoreAudio/CoreAudio.h>
+#import <AudioToolbox/AudioToolbox.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <signal.h>
 #include <math.h>
+#include <objc/message.h>
 
-#define ZB_VERSION "8.7"
+#define ZB_VERSION "8.15"
 static NSString *const kSuite   = @"com.zenbook.helper.settings";
 static NSString *const kCmdNote = @"com.zenbook.helper.cmd";
 static const float kMinLevel  = 0.10f;   // never go fully black on the OLED
@@ -173,9 +176,200 @@ static BOOL ZDedupAccept(ZDedup *d, int src, int dir, double now) {
     d->t[src] = now; d->dir[src] = dir; return YES;
 }
 static float ZClampLevel(float v) { return v < kMinLevel ? kMinLevel : (v > 1.0f ? 1.0f : v); }
+// v8.13: the same 17-point perceptual brightness curve macOS uses for this panel (WhateverXe
+// F19 profile, PNLF UID 19). Level 0..1 -> fraction of the panel maximum. Step 1 of 16 is
+// ~1% (about 6 nits on this OLED), step 8 ~8%, step 16 = 100% - like a MacBook's keys.
+static const uint16_t kCurve[17] = { 0x0000, 0x028F, 0x0353, 0x045A, 0x05A1, 0x07AE, 0x0A3D, 0x0E14, 0x1374,
+                                     0x1A5E, 0x2418, 0x31A9, 0x4459, 0x5E76, 0x8311, 0xB6C7, 0xFF7B };
+static double ZCurve(float level) {
+    double p = (level < 0 ? 0 : (level > 1 ? 1 : level)) * 16.0; int i = (int)floor(p); if (i >= 16) return 1.0;
+    double a = kCurve[i], b = kCurve[i + 1]; return (a + (b - a) * (p - i)) / (double)kCurve[16];
+}
+// A held key repeats every ~80 ms: accept a press only after 0.3 s without any event.
+static BOOL ZPressAccept(double *last, double now) { BOOL ok = (now - *last) > 0.30; *last = now; return ok; }
 static float ZStepLevel(float cur, int dir) {
     float q = roundf(cur * 16.0f) / 16.0f;
     return ZClampLevel(q + dir * kStep);
+}
+
+// =============================================================================
+#pragma mark - Real mute (v8.9)
+// =============================================================================
+// The ALC294 layout accepts the mute flag (the OSD shows "muted") but the speaker amp keeps
+// playing. Watch the built-in output's mute flag and enforce it with the volume:
+// muted -> remember volume, set 0; unmuted -> restore. Any mute source works (keys, menu).
+static AudioObjectPropertyAddress ZAddr(AudioObjectPropertySelector sel, AudioObjectPropertyScope sc) {
+    AudioObjectPropertyAddress a = { sel, sc, kAudioObjectPropertyElementMain }; return a;
+}
+static AudioDeviceID ZDefaultOut(void) {
+    AudioObjectPropertyAddress a = ZAddr(kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal);
+    AudioDeviceID d = 0; UInt32 sz = sizeof(d);
+    return AudioObjectGetPropertyData(kAudioObjectSystemObject, &a, 0, NULL, &sz, &d) == noErr ? d : 0;
+}
+static BOOL ZBuiltIn(AudioDeviceID d) {
+    AudioObjectPropertyAddress a = ZAddr(kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal);
+    UInt32 t = 0, sz = sizeof(t);
+    return d && AudioObjectGetPropertyData(d, &a, 0, NULL, &sz, &t) == noErr && t == kAudioDeviceTransportTypeBuiltIn;
+}
+static BOOL ZMuted(AudioDeviceID d) {
+    for (UInt32 el = 0; el <= 2; el++) {      // main element, then channels 1/2
+        AudioObjectPropertyAddress a = { kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, el };
+        UInt32 m = 0, sz = sizeof(m);
+        if (AudioObjectHasProperty(d, &a) && AudioObjectGetPropertyData(d, &a, 0, NULL, &sz, &m) == noErr) return m != 0;
+    }
+    return NO;
+}
+static float ZVolume(AudioDeviceID d);
+static NSString *ZAudioReport(void) {
+    AudioDeviceID d = ZDefaultOut(); NSMutableString *r = [NSMutableString string];
+    AudioObjectPropertyAddress na = ZAddr(kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal);
+    CFStringRef name = NULL; UInt32 sz = sizeof(name);
+    AudioObjectGetPropertyData(d, &na, 0, NULL, &sz, &name);
+    [r appendFormat:@"default output %u \"%@\" built-in %d volume %.2f\n", (unsigned)d, name ? (__bridge NSString *)name : @"?", ZBuiltIn(d), ZVolume(d)];
+    if (name) CFRelease(name);
+    for (UInt32 el = 0; el <= 2; el++) {
+        AudioObjectPropertyAddress a = { kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, el };
+        UInt32 m = 0; sz = sizeof(m); Boolean settable = false;
+        BOOL has = AudioObjectHasProperty(d, &a);
+        if (has) { AudioObjectGetPropertyData(d, &a, 0, NULL, &sz, &m); AudioObjectIsPropertySettable(d, &a, &settable); }
+        [r appendFormat:@"  mute element %u: %@\n", (unsigned)el, has ? [NSString stringWithFormat:@"%u (settable %d)", (unsigned)m, settable] : @"not present"];
+    }
+    return r;
+}
+static float ZVolume(AudioDeviceID d) {
+    AudioObjectPropertyAddress a = ZAddr(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput);
+    Float32 v = -1; UInt32 sz = sizeof(v); return AudioObjectGetPropertyData(d, &a, 0, NULL, &sz, &v) == noErr ? v : -1;
+}
+static BOOL ZSetVolume(AudioDeviceID d, float v) {
+    AudioObjectPropertyAddress a = ZAddr(kAudioHardwareServiceDeviceProperty_VirtualMainVolume, kAudioDevicePropertyScopeOutput);
+    Float32 f = v; return AudioObjectSetPropertyData(d, &a, 0, NULL, sizeof(f), &f) == noErr;
+}
+// v8.10: on this Hackintosh DisplayServices does not see the panel; only the IODisplay
+// "bklt" parameter of AppleBacklightDisplay exists. Writing it reaches the framebuffer's
+// hwSetBacklight(), which the v3 driver turns into real OLED brightness (VESA AUX).
+static BOOL ZBklt(SInt32 *cur, SInt32 *mx, SInt32 setValue /* -1 = read only */) {
+    io_iterator_t it = 0; BOOL found = NO;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IODisplayConnect"), &it) != KERN_SUCCESS) return NO;
+    io_service_t sv;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    while ((sv = IOIteratorNext(it))) {
+        SInt32 c = 0, mn = 0, m = 0;
+        if (!found && IODisplayGetIntegerRangeParameter(sv, kNilOptions, CFSTR("bklt"), &c, &mn, &m) == kIOReturnSuccess && m > 0) {
+            found = YES;
+            if (setValue >= 0) {
+                IODisplaySetIntegerParameter(sv, kNilOptions, CFSTR("bklt"), setValue > m ? m : setValue);
+                IODisplayCommitParameters(sv, kNilOptions); c = setValue > m ? m : setValue;
+            }
+            if (cur) *cur = c; if (mx) *mx = m;
+        }
+        IOObjectRelease(sv);
+    }
+#pragma clang diagnostic pop
+    IOObjectRelease(it);
+    return found;
+}
+
+static void ShowNotice(NSString *symbol, NSString *text);
+// v8.13: the real macOS on-screen bezel (same as a MacBook) via the private OSDManager.
+// image 1 = brightness, 3 = speaker, 4 = speaker muted. NO when unavailable.
+static BOOL ZShowOSD(long long image, unsigned filled, unsigned total) {
+    static id mgr; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dlopen("/System/Library/PrivateFrameworks/OSD.framework/OSD", RTLD_LAZY);
+        Class c = NSClassFromString(@"OSDManager"); SEL sm = NSSelectorFromString(@"sharedManager");
+        if (c && [c respondsToSelector:sm]) mgr = ((id (*)(id, SEL))objc_msgSend)(c, sm);
+        ZLog(@"macOS OSD bezel %@", mgr ? @"available" : @"not available - helper bezel used");
+    });
+    SEL sel = NSSelectorFromString(@"showImage:onDisplayID:priority:msecUntilFade:filledChiclets:totalChiclets:locked:");
+    if (!mgr || ![mgr respondsToSelector:sel]) return NO;
+    ((void (*)(id, SEL, long long, CGDirectDisplayID, unsigned, unsigned, unsigned, unsigned, BOOL))objc_msgSend)
+        (mgr, sel, image, CGMainDisplayID(), 0x1F4, 1000, filled, total, NO);
+    return YES;
+}
+
+@interface ZMute : NSObject
+- (void)start;
+- (void)muteKey;
+@end
+@implementation ZMute { AudioDeviceID _dev; float _saved; BOOL _enforcing; BOOL _softMuted; double _keyAt, _keySeen; int _repeats; }
+// v8.11: the mute key itself toggles a real mute (volume 0 / restore), whatever the codec does
+// v8.13: one press = one toggle (a held key used to flip mute ~10 times), and the macOS bezel
+// is shown for unmute too (the speaker with the restored volume level).
+- (void)muteKey {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (!ZPressAccept(&_keySeen, now)) { if (_repeats++ < 3) ZLog(@"mute key: repeat ignored"); return; }
+    _keyAt = now;
+    AudioDeviceID d = ZDefaultOut();
+    if (!ZBuiltIn(d)) return;
+    _dev = d;
+    float v = ZVolume(d);
+    if (_softMuted && v > 0.001f) _softMuted = NO;              // volume was raised meanwhile: mute again
+    BOOL muted;
+    if (!_softMuted) {
+        if (v > 0.001f) _saved = v;
+        ZSetVolume(d, 0); _softMuted = YES; muted = YES; v = 0;
+        ZLog(@"mute key: speakers silenced (volume %.2f saved)", _saved);
+    } else {
+        v = _saved > 0.001f ? _saved : 0.5f;
+        ZSetVolume(d, v); _softMuted = NO; muted = NO;
+        ZLog(@"mute key: volume %.2f restored", v); _saved = 0;
+    }
+    unsigned filled = muted ? 0 : (unsigned)MAX(1, lroundf(v * 16));
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!ZShowOSD(muted ? 4 : 3, filled, 16))
+            ShowNotice(muted ? @"speaker.slash.fill" : @"speaker.wave.2.fill", muted ? @"Muted" : @"Sound on");
+    });
+}
+- (void)start {
+    AudioObjectPropertyAddress def = ZAddr(kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal);
+    AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &def, dispatch_get_main_queue(),
+        ^(UInt32 n, const AudioObjectPropertyAddress *a) { [self attach]; });
+    [self attach];
+}
+- (void)attach {
+    AudioDeviceID d = ZDefaultOut();
+    if (d == _dev) return;
+    _dev = d;
+    if (!ZBuiltIn(d)) { ZLog(@"mute: default output is not built-in - hardware mute used"); return; }
+    AudioObjectPropertyAddress m = ZAddr(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput);
+    AudioObjectAddPropertyListenerBlock(d, &m, dispatch_get_main_queue(),
+        ^(UInt32 n, const AudioObjectPropertyAddress *a) { if (d == self->_dev) [self enforce]; });
+    ZLog(@"mute: watching built-in output (muted %d, volume %.2f)", ZMuted(d), ZVolume(d));
+    [self enforce];
+}
+- (void)enforce {
+    if (_enforcing || !_dev) return;
+    if (CFAbsoluteTimeGetCurrent() - _keyAt < 0.8) return;     // the key handler owns this change
+    if (_softMuted && ZVolume(_dev) > 0.001f) { _softMuted = NO; _saved = 0; }   // user raised the volume
+    _enforcing = YES;
+    float v = ZVolume(_dev);
+    if (ZMuted(_dev)) {
+        if (v > 0.001f) { _saved = v; ZSetVolume(_dev, 0); ZLog(@"mute: ON -> speakers silenced (volume %.2f saved)", v); }
+    } else if (_saved > 0.001f && v < 0.001f) {
+        ZSetVolume(_dev, _saved); ZLog(@"mute: OFF -> volume %.2f restored", _saved); _saved = 0;
+    } else if (v > 0.001f) _saved = 0;
+    _enforcing = NO;
+}
+@end
+
+// v8.15: lid wake evidence - driver counters, clamshell state, display sleep state
+static BOOL ZWexLast(uint64_t out[9]) {
+    io_registry_entry_t root = IORegistryGetRootEntry(kIOMainPortDefault);
+    CFTypeRef p = root ? IORegistryEntryCreateCFProperty(root, CFSTR("WEXTGLEDPBacklightLast"), kCFAllocatorDefault, 0) : NULL;
+    BOOL ok = p && CFGetTypeID(p) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)p) >= 72;
+    if (ok) CFDataGetBytes((CFDataRef)p, CFRangeMake(0, 72), (UInt8 *)out);
+    if (p) CFRelease(p);
+    return ok;
+}
+static int ZClamshell(void) {
+    io_service_t pm = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"));
+    if (!pm) return -1;
+    CFTypeRef v = IORegistryEntryCreateCFProperty(pm, CFSTR("AppleClamshellState"), kCFAllocatorDefault, 0);
+    IOObjectRelease(pm);
+    int r = v && CFGetTypeID(v) == CFBooleanGetTypeID() ? CFBooleanGetValue((CFBooleanRef)v) : -1;
+    if (v) CFRelease(v);
+    return r;
 }
 
 // =============================================================================
@@ -186,6 +380,23 @@ typedef int  (*DSSetFn)(CGDirectDisplayID, float);
 static DSGetFn DSGet; static DSSetFn DSSet;
 enum { SrcHotkey = 0, SrcNX, SrcFKey, SrcCLI, SrcNative, SrcFKeyHK };
 static const char *kSrcNames[] = { "ctrl-option-hotkey", "nx-brightness-key", "f14/f15-key(tap)", "cli", "native-slider", "f14/f15-key(hotkey)" };
+
+// v8.8: the patched Iris Xe driver (WhateverXe-UX325 v3, -wex-tgl-edp-bl) drives the OLED's
+// real brightness over DPCD (VESA eDP AUX). It publishes WEXTGLEDPBacklightCaps on the
+// IORegistry root; first value 1 = AUX brightness active. Then macOS' own brightness
+// (keys, slider, OSD) changes the panel itself and the black overlay must stay off.
+static BOOL ZDriverAUXBacklight(void) {
+    io_registry_entry_t root = IORegistryGetRootEntry(kIOMainPortDefault);
+    if (!root) return NO;
+    CFTypeRef p = IORegistryEntryCreateCFProperty(root, CFSTR("WEXTGLEDPBacklightCaps"), kCFAllocatorDefault, 0);
+    BOOL on = NO;
+    if (p && CFGetTypeID(p) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)p) >= 8) {
+        uint64_t st = 0; CFDataGetBytes((CFDataRef)p, CFRangeMake(0, 8), (UInt8 *)&st); on = (st == 1);
+    }
+    if (p) CFRelease(p);
+    IOObjectRelease(root);
+    return on;
+}
 
 @interface ZHUDView : NSView
 @property float value;
@@ -255,6 +466,8 @@ static void ShowNotice(NSString *symbol, NSString *text) {
 @implementation ZBrightness {
     float _level; float _lastNative; double _lastNativeWrite;
     BOOL _nativeLogged, _gammaOK, _gammaLogged; NSString *_activeMode;
+    BOOL _driverNative; double _lastNXTime; int _lastNXDir; ZMute *_mute;
+    double _wakeAt, _macKeysAt; int _wakeKeys; double _sampleT[8]; float _sampleV[8]; int _sampleN;
     ZDedup _dedup;
     NSMutableArray<NSWindow *> *_overlays;
     NSWindow *_hud; ZHUDView *_hudView; NSTimer *_hudTimer;
@@ -276,10 +489,21 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) { [b reenableTap]; return ev; }
     if (type == 14 /* NX_SYSDEFINED */) {
         NSEvent *e = [NSEvent eventWithCGEvent:ev];
+        if (e.subtype == 1 /* NX_SUBTYPE_POWER_KEY */) { [b powerKey:(int)e.data1]; return ev; }
+        if (e.subtype != 8 && e.subtype != 7) {
+            static int seen[32]; int st = (int)e.subtype & 31;
+            if (seen[st]++ < 3) ZLog(@"system key event subtype %d data1 0x%lX", (int)e.subtype, (long)e.data1);
+        }
+        if (e.subtype == 8) {
+            NSInteger dk = e.data1; int kc = (int)((dk & 0xFFFF0000) >> 16);
+            if (kc == 6 /* NX_POWER_KEY */ && (((dk & 0xFF00) >> 8) == 0x0A)) { [b powerKey:-1]; return ev; }
+        }
         if (e.subtype == 8) {
             NSInteger d1 = e.data1;
             int code = (int)((d1 & 0xFFFF0000) >> 16);
-            BOOL down = (((d1 & 0xFF00) >> 8) == 0x0A);
+            BOOL down = (((d1 & 0xFF00) >> 8) == 0x0A), rep = (d1 & 0x1) != 0;
+            if (down) [b noteKey:code repeat:rep];
+            if (down && !rep && code == 7) [b muteKey];           // NX_KEYTYPE_MUTE (held key: once)
             if (down && code == 2) [b step:+1 source:SrcNX];      // NX_KEYTYPE_BRIGHTNESS_UP
             if (down && code == 3) [b step:-1 source:SrcNX];      // NX_KEYTYPE_BRIGHTNESS_DOWN
         }
@@ -316,8 +540,10 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
         ZLog(@"hotkey %s: %@", hks[i].name, st == noErr ? @"registered" : [NSString stringWithFormat:@"failed (%d)", (int)st]);
     }
 
+    [self refreshDriver];
     [self installTap];
-    [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) { if (!self->_tap) [self installTap]; }];
+    _mute = [ZMute new]; [_mute start];
+    [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) { if (!self->_tap) [self installTap]; [self refreshDriver]; }];
     [NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(pollNative) userInfo:nil repeats:YES];
     [NSTimer scheduledTimerWithTimeInterval:4.0 target:self selector:@selector(reassert) userInfo:nil repeats:YES];
 
@@ -380,7 +606,13 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
 // v8.3: default = overlay. In -wexoff mode WindowServer accepts gamma tables but the basic
 // framebuffer never applies them (confirmed on the UX325EA: HUD moved, panel did not dim).
 // On an OLED, darkening the pixels lowers the emitted light physically.
-- (NSString *)mode { NSString *m = [Defs() stringForKey:@"mode"]; return m.length ? m : @"overlay"; }
+// v8.12: software dimming (black overlay / gamma) removed by default - the brightness keys
+// drive the panel's real brightness through the Iris Xe driver. Only an explicit
+// `zenbook-helper mode overlay|gamma|auto` brings the old dimming back.
+- (NSString *)mode {
+    if (![Defs() boolForKey:@"dimForced"]) return @"none";
+    NSString *m = [Defs() stringForKey:@"mode"]; return m.length ? m : @"none";
+}
 
 - (void)installTap {
     if (!CGPreflightListenEventAccess()) {
@@ -400,20 +632,106 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
     [self saveStatus];
 }
 - (void)reenableTap { if (_tap) CGEventTapEnable(_tap, true); }
+// v8.13: evidence for "keys dead after sleep": log the first media keys after each wake
+- (void)noteKey:(int)code repeat:(BOOL)rep {
+    if (rep || CFAbsoluteTimeGetCurrent() - _wakeAt > 120 || _wakeKeys >= 12) return;
+    _wakeKeys++;
+    const char *n = code == 0 ? "volume up" : code == 1 ? "volume down" : code == 7 ? "mute" : code == 2 ? "brightness up" : code == 3 ? "brightness down" : "other";
+    ZLog(@"after wake: key %s (NX %d) received", n, code);
+}
+
+- (BOOL)nativeWanted { return [Defs() objectForKey:@"native"] == nil || [Defs() boolForKey:@"native"]; }
+// macOS-native path (DisplayServices + system OSD) - only when DisplayServices can read the panel
+- (BOOL)nativeActive {
+    return _driverNative && DSGet && DSSet && [self nativeWanted] && [self nativeValue] >= 0;
+}
+// helper-driven real brightness via the IODisplay "bklt" parameter (DisplayServices blind)
+- (BOOL)bkltActive {
+    return _driverNative && [self nativeWanted] && ![self nativeActive] && ZBklt(NULL, NULL, -1);
+}
+- (void)refreshDriver {
+    BOOL d = ZDriverAUXBacklight();
+    if (d != _driverNative) {
+        _driverNative = d;
+        ZLog(@"Iris Xe driver AUX panel brightness: %@ -> %@", d ? @"active" : @"not active",
+             [self nativeActive] ? @"native macOS brightness (overlay off)" :
+             [self bkltActive] ? @"real panel brightness via bklt (overlay off)" : [NSString stringWithFormat:@"helper %@ dimming", [self mode]]);
+        if ([self nativeActive]) { float v = [self nativeValue]; if (v >= 0) _level = v; }
+        [self apply]; [self saveStatus];
+    }
+}
+// Native mode: macOS itself handles the NX brightness keys (AsusSMC) with its own OSD.
+// The same press also arrives as F14/F15 (BrightnessKeys, swallowed by our hotkeys), so an
+// F14/F15 step is only taken when no NX key of that direction came within 150 ms.
+- (void)nativeStep:(int)dir source:(int)src at:(double)now {
+    if (src == SrcNX) {
+        _lastNXTime = now; _lastNXDir = dir;
+        ZLog(@"key %s %s -> macOS native brightness", kSrcNames[src], dir > 0 ? "up" : "down");
+        return;
+    }
+    if (src == SrcFKey || src == SrcFKeyHK) {
+        if (!ZDedupAccept(&_dedup, src, dir, now)) { ZLog(@"key %s %s merged (duplicate path)", kSrcNames[src], dir > 0 ? "up" : "down"); return; }
+        if (now - _macKeysAt < 2.0) { _macKeysAt = now; return; }            // macOS is handling this burst
+        // v8.13: the ASUS driver may hand the same press to macOS directly (native bezel).
+        // Step ourselves only if the brightness did not move within ~0.25 s around the press.
+        float before = [self sampleBefore:now - 0.45], v0 = [self nativeValue];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            float v1 = [self nativeValue];
+            BOOL nx = self->_lastNXDir == dir && fabs(self->_lastNXTime - now) < 0.3;
+            BOOL movedNow = v0 >= 0 && v1 >= 0 && (dir > 0 ? v1 > v0 + 0.004f : v1 < v0 - 0.004f);
+            BOOL movedBefore = before >= 0 && v0 >= 0 && (dir > 0 ? v0 > before + 0.004f : v0 < before - 0.004f) &&
+                               CFAbsoluteTimeGetCurrent() - self->_lastNativeWrite > 0.9;
+            if (nx || movedNow || movedBefore) {
+                self->_macKeysAt = now;
+                ZLog(@"key %s %s handled by macOS itself", kSrcNames[src], dir > 0 ? "up" : "down"); return;
+            }
+            [self nativeApplyStep:dir source:src];
+        });
+        return;
+    }
+    [self nativeApplyStep:dir source:src];
+}
+- (void)muteKey { [_mute muteKey]; }
+// v8.9: macOS receives the ZenBook power button (loginwindow handlePowerButtonEvent) but does
+// nothing with it on this model. Like a MacBook: a short press puts the Mac to sleep.
+- (void)powerKey:(int)data {
+    NSString *pref = [Defs() stringForKey:@"powerbutton"];
+    double now = CFAbsoluteTimeGetCurrent(); static double last;
+    ZLog(@"power button event (0x%X), action %@", data, pref.length ? pref : @"sleep");
+    if ([pref isEqualToString:@"off"] || now - last < 3.0) return;
+    last = now;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ZLog(@"power button -> sleep now"); RunTool(@"/usr/bin/pmset", @[@"sleepnow"]);
+    });
+}
+- (float)sampleBefore:(double)t {
+    float v = -1; double best = -1;
+    for (int i = 0; i < 8 && i < _sampleN; i++) if (_sampleT[i] <= t && _sampleT[i] > best) { best = _sampleT[i]; v = _sampleV[i]; }
+    return v;
+}
+- (void)nativeApplyStep:(int)dir source:(int)src {
+    float v = [self nativeValue]; if (v < 0) v = _level;
+    float nl = roundf(v * 16.0f) / 16.0f + dir * kStep; nl = nl < 0 ? 0 : (nl > 1 ? 1 : nl);
+    ZLog(@"key %s %s -> native %.0f%%", kSrcNames[src], dir > 0 ? "up" : "down", nl * 100);
+    [self setLevel:nl push:YES hud:YES];
+}
 
 - (void)step:(int)dir source:(int)src {
     double now = CFAbsoluteTimeGetCurrent();
+    if ([self nativeActive]) { [self nativeStep:dir source:src at:now]; return; }
     if (!ZDedupAccept(&_dedup, src, dir, now)) { ZLog(@"key %s %s merged (duplicate path)", kSrcNames[src], dir > 0 ? "up" : "down"); return; }
-    float nl = ZStepLevel(_level, dir);
+    float nl = [self bkltActive] ? roundf(_level * 16.0f) / 16.0f + dir * kStep : ZStepLevel(_level, dir);
     ZLog(@"key %s %s -> %.0f%%", kSrcNames[src], dir > 0 ? "up" : "down", nl * 100);
     [self setLevel:nl push:YES hud:YES];
 }
 
 - (void)setLevel:(float)l push:(BOOL)push hud:(BOOL)hud {
-    _level = ZClampLevel(l);
+    if ([self nativeActive]) _level = l < 0 ? 0 : (l > 1 ? 1 : l);
+    else if ([self bkltActive]) _level = l < kStep ? kStep : (l > 1 ? 1 : l);   // darkest step ~1% (like a Mac)
+    else _level = ZClampLevel(l);
     [self apply];
     BOOL hudEnabled = [Defs() objectForKey:@"hud"] == nil || [Defs() boolForKey:@"hud"];
-    if (hud && hudEnabled) [self showHUD];
+    if (hud && hudEnabled && !(([self nativeActive] || [self bkltActive]) && ZShowOSD(1, (unsigned)lroundf(_level * 16), 16))) [self showHUD];
     if (push && DSSet) { DSSet(CGMainDisplayID(), _level); _lastNativeWrite = CFAbsoluteTimeGetCurrent(); _lastNative = _level; }
     [Defs() setFloat:_level forKey:@"level"];
     [self saveStatus];
@@ -439,7 +757,22 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
 }
 
 - (void)apply {
+    if ([self nativeActive]) {
+        CGDisplayRestoreColorSyncSettings(); [self updateOverlay:0];
+        _activeMode = @"native (panel brightness via Iris Xe driver)"; return;
+    }
+    if ([self bkltActive]) {
+        CGDisplayRestoreColorSyncSettings(); [self updateOverlay:0];
+        SInt32 cur = 0, mx = 0; ZBklt(&cur, &mx, -1);
+        SInt32 want = (SInt32)lround(ZCurve(_level) * mx);
+        if (mx > 0 && labs((long)(want - cur)) > 1) { ZBklt(NULL, NULL, want); ZLog(@"panel brightness (bklt) %d/%d = step %.0f/16", (int)want, (int)mx, _level * 16); }
+        _activeMode = @"real panel brightness (bklt -> Iris Xe driver AUX)"; return;
+    }
     NSString *m = [self mode];
+    if ([m isEqualToString:@"none"]) {
+        CGDisplayRestoreColorSyncSettings(); [self updateOverlay:0];
+        _activeMode = _driverNative ? @"real panel brightness" : @"none (no software dimming)"; return;
+    }
     float overlayAlpha = 0;
     if ([m isEqualToString:@"overlay"]) {
         CGDisplayRestoreColorSyncSettings();
@@ -505,7 +838,8 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
         if (!_nativeLogged) { _nativeLogged = YES; ZLog(@"DisplayServices brightness not available (normal in -wexoff mode; keys drive the dimming)"); }
         return;
     }
-    if (_lastNative < 0) { _lastNative = v; if (!_nativeLogged) { _nativeLogged = YES; ZLog(@"DisplayServices brightness readable: %.2f", v); } return; }
+    { int k = _sampleN % 8; _sampleT[k] = CFAbsoluteTimeGetCurrent(); _sampleV[k] = v; _sampleN++; if (_sampleN > 1000) _sampleN = 8 + (_sampleN % 8); }
+    if (_lastNative < 0) { _lastNative = v; if (!_nativeLogged) { _nativeLogged = YES; ZLog(@"DisplayServices brightness readable: %.2f (Control Centre slider + native keys active)", v); } return; }
     if (fabsf(v - _lastNative) > 0.01f) {
         _lastNative = v;
         if (CFAbsoluteTimeGetCurrent() - _lastNativeWrite > 0.8) {
@@ -527,9 +861,29 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
 - (float)nativeValue { float v = -1; if (DSGet && DSGet(CGMainDisplayID(), &v) != 0) v = -1; return v; }
 - (void)wakeOrSwitch:(NSNotification *)n {
     ZLog(@"%@ - re-applying", n.name);
+    if (![n.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification]) { _wakeAt = CFAbsoluteTimeGetCurrent(); _wakeKeys = 0; }
+    if (_tap && !CGEventTapIsEnabled(_tap)) { ZLog(@"key event tap was disabled during sleep - re-enabled"); CGEventTapEnable(_tap, true); }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self nativeRescue]; });
+    if (![n.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification])
+        for (NSNumber *t in @[@2.5, @6.0])
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(t.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self wakeCheck:t.doubleValue]; });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self apply]; });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self apply]; });
+}
+// v8.15: lid open gave a black panel. If macOS restored the brightness while the panel was
+// still powering up, the driver skipped it and the OLED stayed at 0 nits. Re-send the current
+// brightness once the screen is on (two writes, 1 step apart - invisible), and log the state.
+- (void)wakeCheck:(double)after {
+    uint64_t w[9] = {0}; BOOL wex = ZWexLast(w);
+    SInt32 cur = -1, mx = -1; BOOL bk = ZBklt(&cur, &mx, -1);
+    float v = [self nativeValue];
+    BOOL asleep = CGDisplayIsAsleep(CGMainDisplayID());
+    ZLog(@"wake +%.1fs: clamshell %d, display asleep %d, macOS brightness %.2f, bklt %d/%d, driver calls %llu skipped %llu level %llu nits %llu",
+         after, ZClamshell(), asleep, v, (int)cur, (int)mx, wex ? w[0] : 0, wex ? w[3] : 0, wex ? w[4] : 0, wex ? w[8] : 0);
+    if (after < 3 && !asleep && bk && mx > 0 && cur > 1 && [self nativeActive]) {
+        ZBklt(NULL, NULL, cur - 1); ZBklt(NULL, NULL, cur);
+        ZLog(@"wake: brightness re-sent to the panel (bklt %d)", (int)cur);
+    }
 }
 - (void)screensChanged:(NSNotification *)n {
     for (NSWindow *w in _overlays) [w orderOut:nil];
@@ -548,7 +902,8 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
     [Defs() setObject:@{ @"level": @(lroundf(_level * 100)), @"activeMode": _activeMode ?: @"",
                          @"gammaAccepted": @(_gammaOK), @"eventTap": @(_tap != NULL),
                          @"inputMonitoring": @(CGPreflightListenEventAccess()), @"nativeBacklight": @([self nativeValue]),
-                         @"pid": @(getpid()), @"version": @ZB_VERSION } forKey:@"brightnessStatus"];
+                         @"pid": @(getpid()), @"version": @ZB_VERSION, @"driverAUXBrightness": @(_driverNative),
+                         @"nativeMode": @([self nativeActive]), @"bkltMode": @([self bkltActive]) } forKey:@"brightnessStatus"];
 }
 @end
 
@@ -584,7 +939,7 @@ typedef struct { int region; double t0; double x0, y0; BOOL valid, fired; double
     IOHIDManagerRef _mgr; IOHIDDeviceRef _pad; ZAxisMax _max; ZPadGeom _geom;
     BOOL _active; int _ledLevel; NSMutableDictionary<NSNumber *, NSValue *> *_fingers;
     double _lastFrame; BOOL _axWarned;
-    double _lastMultiFinger; BOOL _convertingUp; CFMachPortRef _clickTap;
+    double _lastMultiFinger; BOOL _convertingUp; CFMachPortRef _clickTap; BOOL _clickHID; int _clickLogs;
     BOOL _hidOpen, _hidWarned;
 }
 static ZNumpad *gNumpad;
@@ -691,8 +1046,11 @@ static int MTFrameCB(void *dev, MTTouch *touches, int n, double ts, int frame) {
     if (!enabled && suspend) return;
     NSString *act = @"/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings";
     if (suspend) {
+        // v8.9: never overwrite the saved value while already suspended (it would save "off"
+        // and tap-to-click - including the two-finger tap - would stay disabled for good)
+        if ([Defs() boolForKey:@"numpadTapClickSuspended"]) return;
         NSUserDefaults *tp = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.AppleMultitouchTrackpad"];
-        [Defs() setBool:[tp boolForKey:@"Clicking"] forKey:@"numpadSavedClicking"];
+        [Defs() setBool:([tp objectForKey:@"Clicking"] == nil || [tp boolForKey:@"Clicking"]) forKey:@"numpadSavedClicking"];
         [Defs() setBool:YES forKey:@"numpadTapClickSuspended"];
         RunTool(@"/usr/bin/defaults", @[@"write", @"com.apple.AppleMultitouchTrackpad", @"Clicking", @"-bool", @"false"]);
     } else {
@@ -719,6 +1077,14 @@ static int MTFrameCB(void *dev, MTTouch *touches, int n, double ts, int frame) {
     ZLog(@"numberpad daemon v%s start", ZB_VERSION);
     CrashLoopGuard(@"numpadStarts");
     [self setTapToClickSuspended:NO];                     // undo a previous crash
+    {   // v8.9: tap-to-click stuck off by older versions -> back on (fix-hardware sets it on)
+        NSUserDefaults *tp = [[NSUserDefaults alloc] initWithSuiteName:@"com.apple.AppleMultitouchTrackpad"];
+        if ([tp objectForKey:@"Clicking"] && ![tp boolForKey:@"Clicking"] && ![Defs() boolForKey:@"tapClickOffByUser"]) {
+            RunTool(@"/usr/bin/defaults", @[@"write", @"com.apple.AppleMultitouchTrackpad", @"Clicking", @"-bool", @"true"]);
+            RunTool(@"/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings", @[@"-u"]);
+            ZLog(@"tap to click was off -> switched back on (two-finger tap needs it)");
+        }
+    }
     if (IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) != kIOHIDAccessTypeGranted) {
         BOOL g = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent);
         ZLog(@"Input Monitoring for touchpad access: %@", g ? @"granted" : @"requested - switch ON ZenBookHelper in Privacy & Security > Input Monitoring");
@@ -756,38 +1122,78 @@ static int MTFrameCB(void *dev, MTTouch *touches, int n, double ts, int frame) {
     [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) { if (!self->_clickTap) [self installClickTap]; }];
 }
 
-// Two-finger tap / click -> LEFT click (user preference, default on; `zenbook-helper twofinger right` to undo).
+// v8.14: the user wants the normal Mac behaviour - two fingers open the menu (right click).
+// 8.9-8.13 turned that into a left click by mistake. Conversion now only after an explicit
+// `zenbook-helper twofinger left`; the old stored "left" (set by fix-hardware.sh) is reset once.
 // macOS turns a two-finger tap into a right click; we turn it back into a left click when the
 // trackpad reported two or more fingers in the last 0.35 s. Corner presses and external mice are untouched.
 static CGEventRef ClickTapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, void *ud) {
     ZNumpad *np = (__bridge ZNumpad *)ud;
     return [np clickEvent:ev type:type];
 }
+// v8.13: 8.9-8.12 converted the click at the session level, after WindowServer had already
+// recorded a RIGHT button press - logged as converted, but apps ignored the left click.
+// Now the tap sits at the HID level (before WindowServer), on its own thread so a busy main
+// thread can never delay or disable it. Fallback: session tap + a fresh HID-level left click.
 - (void)installClickTap {
-    if (!AXIsProcessTrusted()) return;                         // active taps need Accessibility
-    CGEventMask m = CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventRightMouseUp);
-    _clickTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, m, ClickTapCB, (__bridge void *)self);
-    if (!_clickTap) { ZLog(@"two-finger click tap could not be created"); return; }
-    CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(NULL, _clickTap, 0);
-    CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes);
-    CGEventTapEnable(_clickTap, true);
-    ZLog(@"two-finger click tap active (mode: %@)", [self twoFingerLeft] ? @"left click" : @"right click");
+    if (_clickTap || !AXIsProcessTrusted()) return;            // active taps need Accessibility
+    if (![self twoFingerLeft]) return;                         // normal Mac menu: no tap at all
+    CGEventMask m = CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged);
+    CFMachPortRef tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, m, ClickTapCB, (__bridge void *)self);
+    _clickHID = (tap != NULL);
+    if (!tap) tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, m, ClickTapCB, (__bridge void *)self);
+    if (!tap) { ZLog(@"two-finger click tap could not be created"); return; }
+    _clickTap = tap;
+    NSThread *t = [[NSThread alloc] initWithBlock:^{
+        CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(NULL, tap, 0);
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
+        CGEventTapEnable(tap, true);
+        CFRunLoopRun();
+    }];
+    t.name = @"two-finger click"; t.qualityOfService = NSQualityOfServiceUserInteractive; [t start];
+    ZLog(@"two-finger click tap active (%@ level, own thread, mode: %@)", _clickHID ? @"HID" : @"session",
+         [self twoFingerLeft] ? @"left click" : @"right click");
 }
-- (BOOL)twoFingerLeft { NSString *m = [Defs() stringForKey:@"twofinger"]; return !m.length || [m isEqualToString:@"left"]; }
+- (BOOL)twoFingerLeft {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        if ([Defs() integerForKey:@"twofingerV"] < 2) {
+            [Defs() setObject:@"right" forKey:@"twofinger"]; [Defs() setInteger:2 forKey:@"twofingerV"]; [Defs() synchronize];
+            ZLog(@"two-finger tap/click = menu (right click), like a Mac");
+        }
+    });
+    return [[Defs() stringForKey:@"twofinger"] isEqualToString:@"left"];
+}
+// runs on the click thread: no AppKit, logging goes through the main queue
 - (CGEventRef)clickEvent:(CGEventRef)ev type:(CGEventType)type {
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) { CGEventTapEnable(_clickTap, true); return ev; }
     if (![self twoFingerLeft]) return ev;
     double now = CFAbsoluteTimeGetCurrent();
-    // only right clicks that follow a 2+ finger touch (two-finger tap); corner presses stay right clicks
-    BOOL fromPad = (_mtDevices > 0) && (now - _lastMultiFinger < 0.35);
-    if (type == kCGEventRightMouseDown && fromPad) {
-        CGEventSetType(ev, kCGEventLeftMouseDown); CGEventSetIntegerValueField(ev, kCGMouseEventButtonNumber, 0);
+    // only right clicks that follow a 2+ finger touch (two-finger tap/click); corner presses stay right clicks
+    double dt = now - _lastMultiFinger;
+    BOOL fromPad = (_mtDevices > 0) && (dt < 0.8);
+    if (type == kCGEventRightMouseDown) {
+        if (_clickLogs++ < 20) {
+            BOOL hid = _clickHID;
+            dispatch_async(dispatch_get_main_queue(), ^{ ZLog(@"right click: last two-finger touch %.2f s ago -> %@", dt,
+                fromPad ? (hid ? @"left click (HID level)" : @"left click (re-posted)") : @"kept as right click"); });
+        }
+        if (!fromPad) { _convertingUp = NO; return ev; }
         _convertingUp = YES;
-    } else if (type == kCGEventRightMouseUp && _convertingUp) {
-        CGEventSetType(ev, kCGEventLeftMouseUp); CGEventSetIntegerValueField(ev, kCGMouseEventButtonNumber, 0);
-        _convertingUp = NO;
+    } else if (!_convertingUp) return ev;
+    CGEventType to = type == kCGEventRightMouseDown ? kCGEventLeftMouseDown : type == kCGEventRightMouseUp ? kCGEventLeftMouseUp : kCGEventLeftMouseDragged;
+    if (type == kCGEventRightMouseUp) _convertingUp = NO;
+    if (_clickHID) {                                           // before WindowServer: convert in place
+        CGEventSetType(ev, to); CGEventSetIntegerValueField(ev, kCGMouseEventButtonNumber, kCGMouseButtonLeft);
+        return ev;
     }
-    return ev;
+    CGEventRef n = CGEventCreateMouseEvent(NULL, to, CGEventGetLocation(ev), kCGMouseButtonLeft);
+    if (n) {
+        CGEventSetIntegerValueField(n, kCGMouseEventClickState, CGEventGetIntegerValueField(ev, kCGMouseEventClickState) ?: 1);
+        CGEventSetFlags(n, CGEventGetFlags(ev));
+        CGEventPost(kCGHIDEventTap, n); CFRelease(n);
+    }
+    return NULL;
 }
 
 - (void)saveStatus {
@@ -889,15 +1295,16 @@ static NSString *ZLinkDesc(CWInterface *i) {
 
 @interface ZWiFi : NSObject
 @end
-@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; }
+@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; }
 - (void)start {
     ZLog(@"Wi-Fi watchdog v%s start", ZB_VERSION);
     CrashLoopGuard(@"wifiStarts");
     _eventAt = CFAbsoluteTimeGetCurrent();
     for (NSString *n in @[NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification])
         [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:n object:nil queue:nil usingBlock:^(NSNotification *note) {
-            self->_eventAt = CFAbsoluteTimeGetCurrent(); ZLog(@"wake - watching Wi-Fi reconnection"); }];
-    [NSTimer scheduledTimerWithTimeInterval:15.0 target:self selector:@selector(check) userInfo:nil repeats:YES];
+            double t = CFAbsoluteTimeGetCurrent(); if (t - self->_eventAt > 5) ZLog(@"wake - watching Wi-Fi reconnection");
+            self->_eventAt = t; self->_cycles = 0; }];
+    [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(check) userInfo:nil repeats:YES];
     [self check];
 }
 - (void)check {
@@ -907,18 +1314,27 @@ static NSString *ZLinkDesc(CWInterface *i) {
     NSString *ip = ZIPv4(i.interfaceName ?: @"en0");
     NSString *desc = ZLinkDesc(i);
     if (ip) {
-        _lastGood = now;
+        if (!_wasUp && _lastGood > 0) ZLog(@"Wi-Fi back after %.0f s", now - MAX(_lastGood, _eventAt));
+        _lastGood = now; _cycles = 0; _wasUp = YES;
         NSString *key = [NSString stringWithFormat:@"%ld/%ld/%.0f", (long)i.activePHYMode, (long)i.wlanChannel.channelNumber, i.transmitRate];
         if (![key isEqualToString:_lastDesc]) { _lastDesc = key; ZLog(@"Wi-Fi up: %@", desc); }
         [Defs() setObject:desc forKey:@"wifiStatus"];
         return;
     }
     [Defs() setObject:desc forKey:@"wifiStatus"];
+    if (_wasUp) { _wasUp = NO; ZLog(@"Wi-Fi lost its connection: %@", desc); }
     if (!i.powerOn) return;                                  // switched off by the user
+    // v8.14: 8.13 switched Wi-Fi off/on every ~40 s, but AirportItlwm needs up to ~2 min to
+    // join at this signal level - each restart threw the join away (test 10:56-11:02: never
+    // connected). Now: never while joined/joining (link up = waiting for DHCP), and at most
+    // ONE off/on per wake or drop, only after 90 s without any link.
+    int assoc = (i.rssiValue != 0 || i.transmitRate > 0) ? 1 : 0;
+    if (assoc != _assocState) { _assocState = assoc; ZLog(@"Wi-Fi %@: %@", assoc ? @"joined, waiting for an IP address" : @"not joined", desc); }
+    if (assoc) return;
     double since = MAX(_lastGood, _eventAt);
-    BOOL recent = (now - _lastGood < 600) || (now - _eventAt < 300);
-    if (recent && now - since > 45 && now - _lastToggle > 300) {
-        _lastToggle = now;
+    BOOL recent = (now - _lastGood < 900) || (now - _eventAt < 600);
+    if (recent && now - since > 90 && _cycles < 1) {
+        _lastToggle = now; _cycles++;
         ZLog(@"Wi-Fi has no IP for %.0f s after %@ - power-cycling Wi-Fi once", now - since, now - _eventAt < 300 ? @"wake/login" : @"a drop");
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             NSError *e1 = nil, *e2 = nil;
@@ -968,6 +1384,12 @@ static int SelfTest(void) {
     CHECK(ZDedupAccept(&d, SrcFKey, -1, 10.160), "opposite direction never merged");
     CHECK(fabsf(ZStepLevel(1.0f, +1) - 1.0f) < 1e-6 && fabsf(ZStepLevel(0.5f, -1) - 0.4375f) < 1e-6, "16 steps, clamped at 100%%");
     CHECK(fabsf(ZStepLevel(0.10f, -1) - kMinLevel) < 1e-6, "never below %.0f%%", kMinLevel * 100);
+    CHECK(ZCurve(0) == 0 && fabs(ZCurve(1) - 1.0) < 1e-9 && fabs(ZCurve(1.0f / 16) - 655.0 / 65403) < 1e-6, "curve ends: 0, step 1 = 1%%, 100%%");
+    { BOOL mono = YES; for (int i = 1; i <= 64; i++) if (ZCurve(i / 64.0f) <= ZCurve((i - 1) / 64.0f)) mono = NO; CHECK(mono, "curve strictly rises"); }
+    CHECK(ZCurve(0.5f) > 0.07 && ZCurve(0.5f) < 0.09, "half-way step = %.1f%% of max (perceptual)", ZCurve(0.5f) * 100);
+    { double last = -100; BOOL a = ZPressAccept(&last, 10.0), b = YES; for (int i = 1; i <= 25; i++) b = b && !ZPressAccept(&last, 10.0 + i * 0.083);
+      BOOL c = ZPressAccept(&last, 10.0 + 25 * 0.083 + 0.5);
+      CHECK(a && b && c, "held mute key (25 repeats, 83 ms) = 1 toggle; next press accepted"); }
     printf("%s (%d failure%s)\n", fails ? "SELFTEST FAILED" : "SELFTEST OK", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }
@@ -975,7 +1397,7 @@ static int SelfTest(void) {
 static void PrintStatus(void) {
     [Defs() synchronize];
     printf("ZenBookHelper %s\n", ZB_VERSION);
-    NSString *mode = [Defs() stringForKey:@"mode"] ?: @"overlay";
+    NSString *mode = [Defs() boolForKey:@"dimForced"] ? ([Defs() stringForKey:@"mode"] ?: @"none") : @"none";
     printf("  settings: mode=%s hud=%s level=%.0f%%\n", mode.UTF8String,
            [Defs() objectForKey:@"hud"] && ![Defs() boolForKey:@"hud"] ? "off" : "on", [Defs() floatForKey:@"level"] * 100);
     printf("  brightness daemon: %s\n", [[[Defs() objectForKey:@"brightnessStatus"] description] UTF8String] ?: "(not running yet)");
@@ -1006,11 +1428,21 @@ int main(int argc, const char *argv[]) {
         if ([a1 isEqualToString:@"wifi"]) { printf("%s\n", ZLinkDesc(CWWiFiClient.sharedWiFiClient.interface).UTF8String); return 0; }
         if ([a1 isEqualToString:@"up"] || [a1 isEqualToString:@"down"]) { Post(a1); return 0; }
         if ([a1 isEqualToString:@"set"] && a2.length) { Post([@"set:" stringByAppendingString:a2]); return 0; }
-        if ([a1 isEqualToString:@"mode"] && ([a2 isEqualToString:@"auto"] || [a2 isEqualToString:@"gamma"] || [a2 isEqualToString:@"overlay"])) {
-            [Defs() setObject:a2 forKey:@"mode"]; [Defs() synchronize]; Post(@"reapply"); printf("mode = %s\n", a2.UTF8String); return 0;
+        if ([a1 isEqualToString:@"audio"]) { printf("%s", ZAudioReport().UTF8String); return 0; }
+        if ([a1 isEqualToString:@"powerbutton"] && ([a2 isEqualToString:@"sleep"] || [a2 isEqualToString:@"off"])) {
+            [Defs() setObject:a2 forKey:@"powerbutton"]; [Defs() synchronize]; printf("power button = %s\n", a2.UTF8String); return 0;
+        }
+        if ([a1 isEqualToString:@"native"] && ([a2 isEqualToString:@"on"] || [a2 isEqualToString:@"off"])) {
+            [Defs() setBool:[a2 isEqualToString:@"on"] forKey:@"native"]; [Defs() synchronize]; Post(@"reapply");
+            printf("native brightness = %s (used only when the Iris Xe driver reports AUX panel brightness)\n", a2.UTF8String); return 0;
+        }
+        if ([a1 isEqualToString:@"mode"] && ([a2 isEqualToString:@"auto"] || [a2 isEqualToString:@"gamma"] || [a2 isEqualToString:@"overlay"] || [a2 isEqualToString:@"none"])) {
+            [Defs() setObject:a2 forKey:@"mode"]; [Defs() setBool:![a2 isEqualToString:@"none"] forKey:@"dimForced"]; [Defs() synchronize];
+            Post(@"reapply"); printf("mode = %s\n", a2.UTF8String); return 0;
         }
         if ([a1 isEqualToString:@"twofinger"] && ([a2 isEqualToString:@"left"] || [a2 isEqualToString:@"right"])) {
-            [Defs() setObject:a2 forKey:@"twofinger"]; [Defs() synchronize]; printf("two-finger tap = %s click\n", a2.UTF8String); return 0;
+            [Defs() setObject:a2 forKey:@"twofinger"]; [Defs() setInteger:2 forKey:@"twofingerV"]; [Defs() synchronize];
+            printf("two-finger tap = %s click%s\n", a2.UTF8String, [a2 isEqualToString:@"right"] ? " (menu, like a Mac)" : ""); return 0;
         }
         if ([a1 isEqualToString:@"hud"] && ([a2 isEqualToString:@"on"] || [a2 isEqualToString:@"off"])) {
             [Defs() setBool:[a2 isEqualToString:@"on"] forKey:@"hud"]; [Defs() synchronize]; return 0;
@@ -1065,7 +1497,7 @@ int main(int argc, const char *argv[]) {
             }
         }
         fprintf(stderr, "usage: ZenBookHelper [--brightness|--numberpad|--wifi] | up | down | set <5-100> | status | wifi |\n"
-                        "       mode <overlay|gamma|auto> | hud <on|off> | twofinger <left|right> | numpad <on|off|toggle|probe|ledtest> | selftest\n");
+                        "       mode <none|overlay|gamma|auto> | native <on|off> | hud <on|off> | twofinger <left|right> | numpad <on|off|toggle|probe|ledtest> | powerbutton <sleep|off> | audio | selftest\n");
         return 2;
     }
 }

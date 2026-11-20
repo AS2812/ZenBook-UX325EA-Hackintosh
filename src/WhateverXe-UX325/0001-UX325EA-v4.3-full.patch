@@ -1,0 +1,441 @@
+diff --git a/WhateverXe/kern_xe.cpp b/WhateverXe/kern_xe.cpp
+index dd72071..5a95cc5 100644
+--- a/WhateverXe/kern_xe.cpp
++++ b/WhateverXe/kern_xe.cpp
+@@ -13,6 +13,7 @@
+ #include "kern_dsi_native_backing.hpp"
+ #include "kern_dsi_native_mode.hpp"
+ #include "kern_xe.hpp"
++#include "kern_edp_aux_backlight.hpp"
+ #include "kern_framebuffer_donor.hpp"
+ #include "kern_xelp_os.hpp"
+ #include "kern_xelp_call_target.hpp"
+@@ -13277,6 +13278,28 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
+ 				IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGOptimalLanesRouted", routed);
+ 				patcher.clearError();
+ 			}
++			tglEDPLaneClamp=checkKernelArgument("-wex-tgl-edp-lanes");
++			IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPLaneClamp",tglEDPLaneClamp);
++			tglEDPTimingFix=checkKernelArgument("-wex-tgl-edp-timing");
++			if (tglEDPTimingFix) {
++				// setDisplayMode() hands hwSetMode() a stack timing that only this function
++				// fills; its AGDC link-modeset failure path returns without writing it.
++				KernelPatcher::RouteRequest timing("__ZN21AppleIntelFramebuffer18setupDisplayTimingEPK29IODetailedTimingInformationV2PS0_",
++					wrapTGLSetupDisplayTiming, orgTGLSetupDisplayTiming);
++				tglEDPTimingFix = patcher.routeMultiple(index, &timing, 1, address, size);
++				patcher.clearError();
++			}
++			IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPTimingFix",tglEDPTimingFix);
++			tglEDPBacklight=checkKernelArgument("-wex-tgl-edp-bl");
++			if (tglEDPBacklight && !adlsDisplaySelected && !display13FramebufferRequested) {
++				// Same native entry the donor uses for Camellia DPCD brightness; only the
++				// ADL-S/ADL-N panel paths route it elsewhere, and those are not TGL.
++				KernelPatcher::RouteRequest bl("__ZN31AppleIntelFramebufferController14hwSetBacklightEj",
++					wrapTGLHwSetBacklight, orgTGLHwSetBacklight);
++				tglEDPBacklight = patcher.routeMultiple(index, &bl, 1, address, size);
++				patcher.clearError();
++			} else tglEDPBacklight = false;
++			IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklight",tglEDPBacklight);
+ 			tglAUXLock = IOSimpleLockAlloc();
+ 			tglDisplayTraceEnabled=checkKernelArgument("-wex-display-trace");
+    tglInitTransitionTrace(tglDisplayTraceEnabled);
+@@ -16892,18 +16915,89 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
+ 
+ // Observe native lane selection. The r62 maximum-lane override was rejected;
+ // successful first-visible r59 also used the same one-to-four-lane sequence.
++static uint64_t tglLinkRateHz(uint32_t code) {
++	switch (code) {
++		case 0x06: return 162000000ULL;
++		case 0x0A: return 270000000ULL;
++		case 0x0C: return 324000000ULL;
++		case 0x14: return 540000000ULL;
++		case 0x1E: return 810000000ULL;
++		default: return 0;
++	}
++}
++
+ uint32_t XE::wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bpp) {
+-	const auto result = FunctionCast(wrapTGLOptimalLaneCount, callbackXE->orgTGLOptimalLaneCount)(port, timing, bpp);
+ 	auto p = static_cast<uint8_t *>(port);
++	auto s = callbackXE;
++	{
++		// UX325EA: getDPCDInfo() raises the cached eDP max rate to the top entry of the
++		// eDP 1.4 SUPPORTED_LINK_RATES table (5.4G), but training only ever programs
++		// LINK_BW_SET, which this panel limits to its MAX_LINK_RATE (0x0A). setupPort()
++		// has just derived port+0x128 (rate) and port+0x140 (link clock) from that cache;
++		// enableClocks() (PLL), SetupDPSSTTimings() (M/N via fb+0x4358 <- port+0x140) and
++		// linkTraining() all read them after this call. Lower both to the sink's own
++		// maximum only when the sink's lane count still carries the mode by the same
++		// rule computeLaneCount() applies. Opt-in: -wex-tgl-edp-lanes.
++		auto cfg = *reinterpret_cast<uint32_t **>(p + 0x548);
++		const auto &panel = s->firmwarePorts.panel;
++		const bool edp = cfg && cfg[0] < 9 && cfg[2] == 0 && (panel.valid ? panel.ddi == cfg[0] : cfg[0] == 0);
++		auto &rate = *reinterpret_cast<uint32_t *>(p + 0x128);
++		if (edp && s->tglEDPLaneClamp && s->tglEDPSinkPort == port && !p[0x117] && timing && bpp) {
++			uint32_t sinkMax = s->tglEDPSinkRate[0];
++			if (s->tglEDPSinkExtCaps && tglLinkRateHz(s->tglEDPSinkRate[1]) && s->tglEDPSinkRate[1] > sinkMax)
++				sinkMax = s->tglEDPSinkRate[1];
++			const uint64_t hz = tglLinkRateHz(sinkMax);
++			const uint32_t sink = p[0x11];
++			const uint64_t pclk = *reinterpret_cast<const uint64_t *>(static_cast<const uint8_t *>(timing) + 0x28);
++			const uint32_t nativeRate = rate;
++			if (hz && tglLinkRateHz(nativeRate) && nativeRate > sinkMax && (sink == 1 || sink == 2 || sink == 4) &&
++			    pclk >= 1000000ULL && pclk <= 2000000000ULL) {
++				const uint64_t x = uint64_t(bpp) * (pclk * 1000 / hz);
++				const uint64_t limit = sink == 1 ? 0x1F48 : sink == 2 ? 0x3E88 : 0x7D08;
++				uint64_t detail[] {cfg[0], nativeRate, sinkMax, s->tglEDPSinkRate[0], s->tglEDPSinkRate[1],
++					s->tglEDPSinkExtCaps, pclk, bpp, x, limit, 0};
++				if (x < limit) {
++					rate = sinkMax;
++					*reinterpret_cast<uint64_t *>(p + 0x140) = hz;
++					detail[10] = 1;
++				}
++				IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPRateFixLast", detail, sizeof(detail));
++			}
++		}
++	}
++	auto result = FunctionCast(wrapTGLOptimalLaneCount, s->orgTGLOptimalLaneCount)(port, timing, bpp);
+ 	auto config = *reinterpret_cast<uint32_t **>(p + 0x548);
+ 	if (!config || config[0] >= 9) return result;
+ 	uint64_t r[12] {}, uptime;
+ 	clock_get_uptime(&uptime); absolutetime_to_nanoseconds(uptime, r);
+-	r[1] = result; r[2] = bpp; r[3] = p[0x11]; r[4] = p[0x117];
++	const auto nativeResult = result;
+ 	auto &lanes = *reinterpret_cast<uint32_t *>(p + 0x124);
+-	r[5] = lanes; r[6] = *reinterpret_cast<uint32_t *>(p + 0x128);
++	const uint32_t nativeLanes = lanes;
++	// UX325EA (Samsung ATNA33XC11, 2-lane eDP): computeLaneCount() rejects the mode
++	// (0xE00002C7) and the donor keeps the stale 4-lane default, so link training
++	// requests LANE_COUNT_SET=4 on a 2-lane sink and clock recovery never completes
++	// on lanes 2/3. setupClocks() continues after this failure, the link clock still
++	// follows the unchanged rate and SetupDPSSTTimings already uses the sink lane
++	// count (port+0x11), so clamping only port+0x124 keeps training, PLL and M/N
++	// consistent. Opt-in: -wex-tgl-edp-lanes. Internal panel port only.
++	uint64_t clamp = 0;
++	if (result != kIOReturnSuccess && callbackXE->tglEDPLaneClamp && !p[0x117]) {
++		const auto &panel = callbackXE->firmwarePorts.panel;
++		const bool panelPort = panel.valid ? panel.ddi == config[0] : config[0] == 0;
++		const uint32_t sink = p[0x11];
++		if (panelPort && (sink == 1 || sink == 2 || sink == 4) && nativeLanes > sink && nativeLanes <= 4) {
++			lanes = sink;
++			result = kIOReturnSuccess;
++			clamp = (uint64_t(nativeLanes) << 8) | sink;
++			uint64_t detail[] {config[0], nativeLanes, sink, *reinterpret_cast<uint32_t *>(p + 0x128), nativeResult, bpp,
++				timing ? *reinterpret_cast<const uint64_t *>(static_cast<const uint8_t *>(timing) + 0x28) : 0};
++			IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPLaneFixLast", detail, sizeof(detail));
++		}
++	}
++	r[1] = nativeResult; r[2] = bpp; r[3] = p[0x11]; r[4] = p[0x117];
++	r[5] = nativeLanes; r[6] = *reinterpret_cast<uint32_t *>(p + 0x128);
+ 	r[7] = *reinterpret_cast<uint32_t *>(p + 0x550);
+-	r[8] = lanes; r[9] = 0; r[11] = config[0];
++	r[8] = lanes; r[9] = clamp; r[11] = config[0];
+ 	static uint32_t sequence {};
+ 	r[10] = __sync_add_and_fetch(&sequence, 1);
+ 	char key[48]; snprintf(key, sizeof(key), "TGLOptimalLanesLast%u", static_cast<uint32_t>(r[10]) % 32);
+@@ -16915,6 +17009,200 @@ uint32_t XE::wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bp
+ 	return result;
+ }
+ 
++void XE::wrapTGLSetupDisplayTiming(void *fb, const void *src, void *out) {
++	// UX325EA: AppleIntelFramebuffer::setupDisplayTiming(src, out) asks the AGDC
++	// receiver (event 0xC) for a link mode. On "kAGDCRegisterLinkModesetCallback
++	// failed" / "invalid index" it returns before writing `out`, and setDisplayMode()
++	// passes that uninitialized stack buffer to hwSetMode(): garbage pixel clock and
++	// timings (computeLaneCount 0xE00002C7, SetupTimings divide error, wrong M/N).
++	// Its normal path is memmove(out, src, 0xA0); its override path writes 0xC..0x95.
++	// Prefill `out` with src so every path leaves a complete, valid timing.
++	auto s = callbackXE;
++	constexpr size_t size = 0xA0;
++	constexpr uint32_t marker = 0x57455846;
++	uint32_t head {};
++	if (src && out) {
++		memcpy(out, src, size);
++		memcpy(&head, src, sizeof(head));
++		memcpy(out, &marker, sizeof(marker));
++	}
++	auto b = static_cast<uint8_t *>(fb);
++	const int32_t before = b ? *reinterpret_cast<int32_t *>(b + 0x3FD8) : -2;
++	FunctionCast(wrapTGLSetupDisplayTiming, s->orgTGLSetupDisplayTiming)(fb, src, out);
++	if (!src || !out) return;
++	uint32_t now {};
++	memcpy(&now, out, sizeof(now));
++	const bool untouched = now == marker;
++	if (untouched) memcpy(out, &head, sizeof(head));
++	const bool same = !memcmp(out, src, size);
++	static uint32_t sequence {}, rescued {};
++	const auto seq = __sync_add_and_fetch(&sequence, 1);
++	if (untouched && same) __sync_add_and_fetch(&rescued, 1);
++	auto t = static_cast<const uint8_t *>(src);
++	uint64_t r[] {seq, untouched, same, rescued,
++		static_cast<uint64_t>(static_cast<int64_t>(before)),
++		static_cast<uint64_t>(static_cast<int64_t>(b ? *reinterpret_cast<int32_t *>(b + 0x3FD8) : -2)),
++		*reinterpret_cast<const uint64_t *>(t + 0x28), *reinterpret_cast<const uint32_t *>(t + 0x40),
++		*reinterpret_cast<const uint32_t *>(t + 0x50), b ? *reinterpret_cast<uint32_t *>(b + 0x1DC) : ~0U};
++	IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPTimingLast", r, sizeof(r));
++	if (seq <= 8) {
++		char key[40]; snprintf(key, sizeof(key), "WEXTGLEDPTimingFirst%u", seq);
++		IORegistryEntry::getRegistryRoot()->setProperty(key, r, sizeof(r));
++	}
++}
++
++// Max luminance (nits) from the panel's CTA-861 HDR static metadata, cached by the DDC
++// observer as TGLWEGPort<ddi>DDCExtension: 50 * 2^(CV/32) (CTA-861-G 7.5.13).
++static uint32_t tglEDPEDIDMaxNits(uint32_t ddi) {
++	static const uint16_t pow2[32] {1000,1022,1044,1067,1091,1115,1139,1164,1189,1215,1242,1269,1297,1325,1354,1384,
++		1414,1445,1477,1509,1542,1576,1610,1646,1682,1719,1756,1795,1834,1874,1915,1957};
++	char key[40]; snprintf(key, sizeof(key), "TGLWEGPort%uDDCExtension", ddi);
++	auto data = OSDynamicCast(OSData, IORegistryEntry::getRegistryRoot()->getProperty(key));
++	if (!data || data->getLength() < 128) return 0;
++	auto e = static_cast<const uint8_t *>(data->getBytesNoCopy());
++	if (e[0] != 0x02 || e[2] < 4 || e[2] > 127) return 0;
++	for (uint32_t i = 4; i < e[2];) {
++		const uint32_t tag = e[i] >> 5, len = e[i] & 31;
++		if (i + 1 + len > e[2]) break;
++		if (tag == 7 && len >= 4 && e[i + 1] == 6) {
++			const uint32_t cv = e[i + 4];
++			return cv ? (50U << (cv >> 5)) * pow2[cv & 31] / 1000 : 0;
++		}
++		i += 1 + len;
++	}
++	return 0;
++}
++
++// Panel nits for a macOS backlight level (0..65535) on the Intel OLED interface.
++static uint32_t tglEDPBLNitsFor(uint32_t maxNits, uint32_t level) {
++	uint32_t written = uint32_t(uint64_t(level) * maxNits / 65535);
++	if (level && !written) written = 1;
++	// v4.1: keep about 0.5% of the panel maximum unless -wex-tgl-edp-bl-zero asks for
++	// MacBook-style "off at 0" (the UX325EA owner wants black at 0).
++	const uint32_t floorNits = maxNits / 200 ? maxNits / 200 : 1;
++	if (written < floorNits && !checkKernelArgument("-wex-tgl-edp-bl-zero")) written = floorNits;
++	return written;
++}
++
++// v4.3: lid open showed a black panel. macOS restores the brightness while waking; when that
++// write comes before the eDP panel is powered it is skipped (AUX to an unpowered sink only
++// times out) and the panel keeps the 0 nits written on lid close. Re-send the last requested
++// level as soon as the sink is powered (DPCD SET_POWER D0).
++void XE::tglEDPBLReapply(XE *s, void *port) {
++	const uint32_t level = s->tglEDPBLWantLevel;
++	const uint32_t written = tglEDPBLNitsFor(s->tglEDPBLMaxNits, level);
++	uint8_t ctrl = 0;
++	bool ok = XE::wrapTGLReadAUX(port, 0x344, &ctrl, 1) == 0;
++	if (ok && !(ctrl & 0x10)) { uint8_t want = uint8_t(ctrl | 0x10); ok = XE::wrapTGLWriteAUX(port, 0x344, &want, 1) == 0; }
++	uint8_t buf[4] {uint8_t(written), uint8_t(written >> 8), 0, 0};
++	ok = ok && XE::wrapTGLWriteAUX(port, 0x354, buf, sizeof(buf)) == 0;
++	if (ok) s->tglEDPBLPending = false;
++	SYSLOG("wex", "UX325 panel brightness re-sent after panel power-on: level %u -> %u nits (ok %d)", level, written, ok);
++	uint32_t r[] {level, written, ok};
++	IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightReapply", r, sizeof(r));
++}
++
++uint32_t XE::wrapTGLHwSetBacklight(void *controller, uint32_t level) {
++	// UX325EA (Samsung ATNA33XC11 OLED): the donor drives only the PCH PWM duty (0xC8258)
++	// unless an Apple Camellia TCON is present. An OLED has no PWM backlight, so macOS
++	// brightness never reached the panel. Keep the native path, then set the panel's own
++	// brightness over DPCD:
++	//  - Intel HDR/OLED interface (DPCD 0x340: version, 0x341 bit4 nits cap, 0x342 bit0 SDR
++	//    AUX cap; 0x344 bit4 AUX enable; 0x354..0x357 = nits LSB/MSB, delay, steps), as
++	//    Linux intel_dp_aux_backlight.c. The firmware already programs Intel's source OUI.
++	//    Range 0..EDID max luminance (default 512 nits, as Linux).
++	//  - otherwise standard VESA eDP brightness (EDPAuxBacklight; PWMGEN bit count 0 means
++	//    the full 8/16-bit register range).
++	// Opt-in: -wex-tgl-edp-bl.
++	auto s = callbackXE;
++	const auto result = FunctionCast(wrapTGLHwSetBacklight, s->orgTGLHwSetBacklight)(controller, level);
++	auto port = s->tglEDPSinkPort;
++	if (!s->tglEDPBacklight || !port || !controller || level > 65535 || s->tglEDPBLState == 2) return result;
++	auto cfg = *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port) + 0x548);
++	if (!cfg || cfg[2] != 0) return result;
++	// AUX to an unpowered eDP sink only times out: require PP_STATUS on.
++	auto access = *reinterpret_cast<void **>(static_cast<uint8_t *>(controller) + 0xC40);
++	const uint32_t pp = access && s->orgTGLRegisterRead ?
++		FunctionCast(wrapTGLRegisterRead, s->orgTGLRegisterRead)(access, 0xC7200) : UINT32_MAX;
++	static uint32_t calls {}, applied {}, failed {}, skipped {};
++	__sync_add_and_fetch(&calls, 1);
++	s->tglEDPBLWantLevel = level;
++	if (pp == UINT32_MAX || !(pp & 0x80000000U)) {
++		__sync_add_and_fetch(&skipped, 1);
++		s->tglEDPBLPending = (s->tglEDPBLState == 1 && s->tglEDPBLIface == 2);
++		uint64_t r[] {calls, applied, failed, skipped, level, pp, s->tglEDPBLState, 0, 0};
++		IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightLast", r, sizeof(r));
++		return result;
++	}
++	struct TGLEDPAUX {
++		void *port;
++		bool read(uint32_t a, void *p, uint32_t n) { return XE::wrapTGLReadAUX(port, a, p, n) == 0; }
++		bool write(uint32_t a, void *p, uint32_t n) { return XE::wrapTGLWriteAUX(port, a, p, n) == 0; }
++	} io {port};
++	if (s->tglEDPBLState == 0) {
++		// One-time record of the panel's display-control registers for diagnosis.
++		struct Block { uint32_t address, length; } blocks[] {{0x000, 16}, {0x700, 16}, {0x720, 16}, {0x340, 32}, {0x300, 12}};
++		uint8_t dump[5][36] {};
++		for (size_t i = 0; i < arrsize(blocks); i++) {
++			dump[i][0] = uint8_t(blocks[i].address >> 8); dump[i][1] = uint8_t(blocks[i].address);
++			dump[i][2] = uint8_t(blocks[i].length); dump[i][3] = io.read(blocks[i].address, dump[i] + 4, blocks[i].length);
++		}
++		IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPPanelDPCD", dump, sizeof(dump));
++		uint8_t tcon[4] {};
++		const bool intel = !checkKernelArgument("-wex-tgl-edp-bl-vesa") && io.read(0x340, tcon, sizeof(tcon)) &&
++			tcon[0] >= 1 && (tcon[1] & 0x10) && (tcon[2] & 0x01);
++		EDPAuxBacklight::Caps caps;
++		bool vesa = false;
++		if (!intel) {
++			const bool probed = EDPAuxBacklight::probe(io, caps);
++			if (!probed && caps.set && !caps.maximum) caps.maximum = caps.wide ? 0xFFFF : 0xFF;  // PWMGEN bits 0
++			vesa = caps.set && caps.maximum;
++		}
++		s->tglEDPBLCaps[0] = caps.set; s->tglEDPBLCaps[1] = caps.enable; s->tglEDPBLCaps[2] = caps.wide; s->tglEDPBLCaps[3] = vesa;
++		s->tglEDPBLMaximum = caps.maximum;
++		s->tglEDPBLIface = intel ? 2 : vesa ? 1 : 0;
++		if (intel) {
++			const auto nits = tglEDPEDIDMaxNits(cfg[0]);
++			s->tglEDPBLMaxNits = nits >= 50 && nits <= 10000 ? nits : 512;
++		}
++		s->tglEDPBLState = (intel || vesa) ? 1 : 2;
++		uint64_t r[] {s->tglEDPBLState, caps.set, caps.enable, caps.wide, caps.maximum, s->tglEDPBLIface, s->tglEDPBLMaxNits,
++			uint64_t(tcon[0]) | uint64_t(tcon[1]) << 8 | uint64_t(tcon[2]) << 16 | uint64_t(tcon[3]) << 24};
++		IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightCaps", r, sizeof(r));
++		if (s->tglEDPBLState != 1) return result;
++	}
++	bool ok = false;
++	uint32_t written = 0;
++	if (s->tglEDPBLIface == 2) {
++		uint8_t ctrl = 0;
++		ok = io.read(0x344, &ctrl, 1);
++		if (ok && !(ctrl & 0x10)) { uint8_t want = uint8_t(ctrl | 0x10); ok = io.write(0x344, &want, 1); }
++		written = tglEDPBLNitsFor(s->tglEDPBLMaxNits, level);
++		uint8_t buf[4] {uint8_t(written), uint8_t(written >> 8), 0, 0};
++		ok = ok && io.write(0x354, buf, sizeof(buf));
++		if (ok) s->tglEDPBLPending = false;
++	} else {
++		EDPAuxBacklight::Caps caps;
++		caps.set = s->tglEDPBLCaps[0]; caps.enable = s->tglEDPBLCaps[1]; caps.wide = s->tglEDPBLCaps[2]; caps.maximum = s->tglEDPBLMaximum;
++		if (level < 328 && !checkKernelArgument("-wex-tgl-edp-bl-zero")) level = 328;   // same 0.5% floor
++		ok = EDPAuxBacklight::apply(io, caps, EDPAuxBacklight::Action::Enable, level);
++		written = uint32_t(uint64_t(level) * caps.maximum / 65535);
++	}
++	__sync_add_and_fetch(ok ? &applied : &failed, 1);
++	{
++		// v4.2: timeline evidence (e.g. "screen goes black at once" on Shut Down): log every
++		// change between off (level 0) and on, plus the first write. Two lines per sleep cycle.
++		static uint32_t lastLevel = UINT32_MAX;
++		if (lastLevel == UINT32_MAX || (lastLevel == 0) != (level == 0))
++			SYSLOG("wex", "UX325 panel brightness %s: level %u -> %u (iface %u, ok %d, calls %llu)",
++				level ? "on" : "off", level, written, s->tglEDPBLIface, ok, (unsigned long long)calls);
++		lastLevel = level;
++	}
++	uint64_t r[] {calls, applied, failed, skipped, level, pp, s->tglEDPBLState, ok, written};
++	IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightLast", r, sizeof(r));
++	return result;
++}
++
+ uint32_t XE::wrapTGLDPPower(void *port, uint8_t state) {
+ 	auto caller = __builtin_return_address(0);
+ 	tglConnectionRecord(port, 4, false, 0, state, caller);
+@@ -16928,6 +17216,9 @@ uint32_t XE::wrapTGLDPPower(void *port, uint8_t state) {
+ 	const auto effective = static_cast<uint8_t>(record[3]);
+ 	tglAUXRecord(port, 2, false, 0, state, effective);
+ 	const auto result = FunctionCast(wrapTGLDPPower, s->orgTGLDPPower)(port, effective);
++	if (effective == 1 && result == 0 && port == s->tglEDPSinkPort && s->tglEDPBacklight && s->tglEDPBLPending &&
++	    s->tglEDPBLState == 1 && s->tglEDPBLIface == 2 && s->tglEDPBLWantLevel <= 65535)
++		tglEDPBLReapply(s, port);
+ 	tglConnectionRecord(port, 4, true, result, effective, caller);
+ 	tglAUXRecord(port, 2, true, result, state, effective);
+ 	clock_get_uptime(&uptime); absolutetime_to_nanoseconds(uptime, record + 1);
+@@ -19674,6 +19965,20 @@ uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t l
+ 		return FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, address, data, length);
+ 	});
+ 	tglDPCDRecord(port, address, data, length, false, true, r, caller);
++	// UX325EA: remember the eDP sink's own MAX_LINK_RATE (0x001, extended 0x2201).
++	if (r == 0 && data && length && length <= 0x100 && (callbackXE->tglEDPLaneClamp || callbackXE->tglEDPBacklight)) {
++		auto cfg = *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(port) + 0x548);
++		if (cfg && cfg[2] == 0) {
++			auto s = callbackXE;
++			auto d = static_cast<const uint8_t *>(data);
++			if (s->tglEDPSinkPort != port) {
++				s->tglEDPSinkPort = port; s->tglEDPSinkRate[0] = s->tglEDPSinkRate[1] = 0; s->tglEDPSinkExtCaps = false;
++			}
++			if (address <= 0x001 && address + length > 0x001) s->tglEDPSinkRate[0] = d[0x001 - address];
++			if (address <= 0x00E && address + length > 0x00E) s->tglEDPSinkExtCaps = (d[0x00E - address] & 0x80) != 0;
++			if (address <= 0x2201 && address + length > 0x2201) s->tglEDPSinkRate[1] = d[0x2201 - address];
++		}
++	}
+ 	return r;
+ }
+ 
+diff --git a/WhateverXe/kern_xe.hpp b/WhateverXe/kern_xe.hpp
+index e6b18a7..5215898 100644
+--- a/WhateverXe/kern_xe.hpp
++++ b/WhateverXe/kern_xe.hpp
+@@ -558,12 +558,32 @@ private:
+ 	mach_vm_address_t tglPGFuseWaitFunction {};
+ 	mach_vm_address_t tglComboPLLFractionCaller {};
+ 	bool tglSinkFramingReady {};
++	// UX325EA: clamp a failed eDP lane computation to the sink lane count (-wex-tgl-edp-lanes)
++	bool tglEDPLaneClamp {};
++	// UX325EA: prefill setupDisplayTiming() output when the AGDC link-modeset query fails (-wex-tgl-edp-timing)
++	bool tglEDPTimingFix {};
++	bool tglEDPSinkExtCaps {};
++	uint8_t tglEDPSinkRate[2] {};
++	void *tglEDPSinkPort {};
++	// UX325EA: VESA eDP AUX brightness on the TGL internal panel (-wex-tgl-edp-bl)
++	bool tglEDPBacklight {};
++	uint8_t tglEDPBLState {};          // 0 not probed, 1 VESA AUX active, 2 unsupported
++	uint8_t tglEDPBLCaps[4] {};        // set, enable, wide, valid
++	uint32_t tglEDPBLMaximum {};
++	uint8_t tglEDPBLIface {};          // 1 VESA eDP, 2 Intel HDR/OLED nits interface (DPCD 0x340-0x357)
++	uint32_t tglEDPBLMaxNits {};
++	uint32_t tglEDPBLWantLevel {UINT32_MAX};   // v4.3: last level macOS asked for
++	bool tglEDPBLPending {};                  // v4.3: that request arrived while the panel was off
++	mach_vm_address_t orgTGLHwSetBacklight {};
++	mach_vm_address_t orgTGLSetupDisplayTiming {};
+ 	bool tglComboAUXGateReady {};
+ 	mach_vm_address_t tglPortByIndex {};
+ 	mach_vm_address_t orgTGLCheckLinkStatus {};
+ 	static uint32_t wrapTGLCheckLinkStatus(void *port);
+ 	mach_vm_address_t orgTGLOptimalLaneCount {};
+ 	static uint32_t wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bpp);
++	static void wrapTGLSetupDisplayTiming(void *fb, const void *src, void *out);
++	static uint32_t wrapTGLHwSetBacklight(void *controller, uint32_t level);
+ 	static void tglObserveCursorMemory(void *fb);
+ 	mach_vm_address_t orgTGLCursorSetup {}, orgTGLRestoreGTT {}, orgTGLCursorImage {};
+ 	static uint32_t wrapTGLCursorSetup(void *controller);
+@@ -763,6 +783,7 @@ private:
+ 	static void wrapTGLEnablePipe(void *controller, void *fb, void *path, const void *timing);
+ 	static uint32_t wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t length);
+ 	static uint32_t wrapTGLWriteAUX(void *port, uint32_t address, void *data, uint32_t length);
++	static void tglEDPBLReapply(XE *s, void *port);
+ 	static uint32_t wrapTGLI2CAUX(void *port, uint32_t command, uint32_t *packet, uint32_t length, uint8_t flag);
+ 	mach_vm_address_t orgTGLFreeResources {}, orgTGLFreePathResources {}, orgTGLAllocateResources {};
+ 	mach_vm_address_t orgTGLFBDisable {}, orgTGLReleaseResources {}, orgTGLCommitResources {};
+diff --git a/tests/fixtures/boot_argument_names.json b/tests/fixtures/boot_argument_names.json
+index f6a6c31..4f7ad0a 100644
+--- a/tests/fixtures/boot_argument_names.json
++++ b/tests/fixtures/boot_argument_names.json
+@@ -148,5 +148,10 @@
+   "-wex-adlp-load-only": [],
+   "-wex-display13-offline": [],
+   "-wex-dsi-hdmi-test": [],
+-  "-wex-dsi-power-test": []
++  "-wex-dsi-power-test": [],
++  "-wex-tgl-edp-lanes": [],
++  "-wex-tgl-edp-timing": [],
++  "-wex-tgl-edp-bl": [],
++  "-wex-tgl-edp-bl-vesa": [],
++  "-wex-tgl-edp-bl-zero": []
+ }
+diff --git a/tests/tgl_bootstrap_aux_fixture.cpp b/tests/tgl_bootstrap_aux_fixture.cpp
+index 2e39c1b..b29cc07 100644
+--- a/tests/tgl_bootstrap_aux_fixture.cpp
++++ b/tests/tgl_bootstrap_aux_fixture.cpp
+@@ -22,6 +22,8 @@ constexpr uint32_t kIOReturnNotReady=0xe00002d8;
+ template<class... T> void tglDPCDRecord(T...){}
+ struct XE {
+  bool tglBootstrapAUXReady {};uintptr_t orgTGLReadAUX {},orgTGLWriteAUX {},orgTGLI2CAUX {};
++ // UX325EA eDP sink-cap cache (disabled unless -wex-tgl-edp-lanes).
++ bool tglEDPLaneClamp {},tglEDPBacklight {},tglEDPSinkExtCaps {};unsigned char tglEDPSinkRate[2] {};void *tglEDPSinkPort {};
+  static uint32_t wrapTGLReadAUX(void*,uint32_t,void*,uint32_t);
+  static uint32_t wrapTGLWriteAUX(void*,uint32_t,void*,uint32_t);
+  static uint32_t wrapTGLI2CAUX(void*,uint32_t,uint32_t*,uint32_t,uint8_t);

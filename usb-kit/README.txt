@@ -1,5 +1,117 @@
-ZenBook UX325EA Hackintosh - v9.2 (2026-11-19)
-================================================
+ZenBook UX325EA Hackintosh - v10.0 (2026-11-20)
+=================================================
+
+v10.0 - lid wake fix + ready to make permanent
+  v9.9 test: EVERYTHING works (shutdown shows apps closing, brightness keys + slider, volume,
+  mute, two-finger menu, Wi-Fi, keys after power-button sleep) - except: lid open = black screen.
+  - Lid: on lid close macOS fades the OLED to 0 (black since v9.9, as wished). If macOS sends the
+    "restore brightness" before the panel is powered again, the driver had to skip it and the
+    OLED stayed at 0. Driver v4.3 re-sends the last brightness the moment the panel powers on;
+    helper 8.15 also re-sends it 2.5 s after every wake and logs lid/clamshell state.
+  - All USB profiles are now the final setup: config.plist = config-gpu = config-trial;
+    config-stable = same fixes without GPU acceleration (safe mode, verbose boot).
+  - When the test says EVERYTHING WORKS:  sudo sh sync-efi-to-ssd.sh --launcher-full
+    copies this setup to the SSD (Windows untouched). Then the laptop starts without the USB.
+
+v9.9 - USB test setup: volume/mute after sleep via BrightnessKeys, black at 0, shutdown log
+  v9.8 test: brightness keys, Control Centre slider, mute, two-finger menu and Wi-Fi OK.
+  Volume/mute still dead after lid or power-button sleep.
+  - Brightness (Fn+F4/F5) uses EC query -> Notify(DD1F) -> BrightnessKeys -> PS/2 keyboard and
+    keeps working after sleep. Volume/mute used EC query -> ATKD queue -> AsusSMC, which stops
+    after sleep. SSDT-WAKE v1.2 now sends volume up/down/mute as Notify(DD1F, 0x90/0x91/0x92);
+    BrightnessKeys-UX325.kext (BrightnessKeys 1.0.3 + these 3 codes) turns them into the PS/2
+    keyboard's sound up/down/mute keys - the same proven path as brightness.
+  - Brightness 0 = black screen again, as wished (boot-arg -wex-tgl-edp-bl-zero).
+  - Shut Down "screen goes black at once": the GPU driver now logs every panel on/off, and the
+    test records the whole previous shutdown (WindowServer crashed late in one earlier shutdown).
+  - Microphone: the test records the firmware's audio table (NHLT) and the codec inputs to
+    check once more whether the built-in mic is wired to the Realtek codec or to Intel's DSP.
+
+v9.8 - USB test setup: Fn keys after sleep (queue fix), two-finger menu, Wi-Fi, never black
+  v9.7 test: Control Centre brightness and the native brightness keys are active (macOS
+  brightness 0..100% drives the OLED). Wi-Fi did not connect, volume/mute dead after sleep,
+  two-finger tap did not open the menu, shutdown slow with a black screen.
+  - Volume / mute after sleep: ASUS sends these keys through a 16-entry queue in ATKD (one
+    Notify per key, AsusSMC takes one entry per Notify). One lost Notify around sleep leaves
+    an old entry behind for good - every later key delivers the PREVIOUS key's code.
+    SSDT-WAKE v1.1 empties stale entries before each new key and on every wake
+    (OpenCore renames ATKD.IANE -> XANE; brightness uses another path, so it kept working).
+  - Two fingers open the menu again (right click, like a Mac). Helper 8.9-8.13 had turned it
+    into a left click by mistake.
+  - Wi-Fi: helper 8.13 switched Wi-Fi off/on every ~40 s while AirportItlwm needs up to
+    2 minutes to join at -75..-88 dBm: it never connected. Now never while joining, at most
+    once per wake/drop after 90 s without a link. Signal is weak where the laptop is used:
+    closer to the router or its 5 GHz network = faster and steadier.
+  - Brightness 0% no longer turns the OLED black: driver v4.1 keeps 0.5% (3 nits).
+  - Shut Down: the test copies macOS' "shutdown stall" reports to find what blocks it.
+
+v9.7 - USB test setup: Control Centre brightness slider, keys after sleep, two-finger click
+  Confirmed by the v9.6 test: real OLED brightness, Bluetooth (real controller address),
+  mute, lid sleep and power-button sleep. Now on the USB test setup:
+  - Control Centre DISPLAY slider + Mac brightness curve: the backlight device (PNLF) had
+    ID 24. The GPU driver adds its 16-bit brightness profile only for ID 19, so macOS never
+    created a "brightness" control (only the raw "bklt" value). PNLF is now ID 19: macOS
+    controls the OLED itself (slider, keys, brightness symbol, 16 steps, darkest step ~1%).
+  - Keys dead after sleep: the embedded controller forgets the ASUS hotkey driver on wake.
+    New SSDT-WAKE re-registers it on every wake (ATKD.INIT, as Windows does), through ASUS'
+    empty XWAK hook (OpenCore renames DSDT XWAK->YWAK and XPTS->YPTS, 1 match each).
+  - Shut Down: the USB controller can no longer wake the laptop right back up (XHCI PME off).
+    The test now records how the previous shutdown ended.
+  - Helper 8.13: one mute press = one toggle (a held key flipped it ~10 times); mute AND unmute
+    show the macOS speaker symbol; brightness uses the macOS bezel; two-finger tap -> left
+    click is converted before WindowServer (8.9-8.12 converted too late, apps ignored it);
+    Wi-Fi: reconnect after 12 s without IP after wake (was 45 s), up to 3 tries.
+  - Microphone: still not possible on macOS (digital mic on Intel's audio DSP). Use a headset
+    (audio jack), Bluetooth (AirPods) or a USB microphone.
+  - Test:  Shut Down, plug in the USB, power on tapping Esc, choose the USB, then
+           sh "/Volumes/Install macOS Sonoma/fix-hardware.sh" --test
+
+v9.6 - USB test setup: REAL OLED brightness v4, Bluetooth fix, lock screen, no software dimming
+  - Brightness: the panel is a Samsung OLED with Intel's OLED brightness interface (DPCD 0x340:
+    01 57 01, AUX enabled by the BIOS). Driver v4 sets the real brightness in nits (0x354)
+    using the panel's EDID maximum (617 nits), like Linux. The VESA registers were ignored.
+  - Software dimming (dark layer) removed. Fn+F4/F5 change only the real panel brightness.
+  - Bluetooth: NVRAM bluetoothExternalDongleFailed=00 + bluetoothInternalControllerInfo=14x00
+    (rewritten every boot) + -btlfxallowanyaddr. Fix confirmed on the same AX201 chip
+    (OpenIntelWireless/IntelBluetoothFirmware issue 513). Needs a full Shut Down, then power on.
+  - --test now sets "require password immediately after sleep" (lid / power button).
+  - USB map: HS04 is an outside port.  sync-efi-to-ssd.sh keeps its backup on the laptop.
+
+v9.5 - THE USB IS THE TEST SETUP, THE SSD IS YOUR NORMAL MAC
+  - Without the USB: the laptop starts from the SSD = your normal, working setup.
+  - With the USB: power on, tap Esc, choose the USB ("UEFI: ..." entry) = newest TEST setup
+    (GPU driver v3 with real OLED brightness, USB map for Bluetooth, helper 8.11).
+    Then run:  sh "/Volumes/Install macOS Sonoma/fix-hardware.sh" --test
+    It updates the helper, guides 5 short tests and saves everything for the other Mac.
+  - Test broke something? Shut down, unplug the USB, power on = normal Mac.
+  - Helper 8.11: the mute key itself mutes (volume 0 / restore).
+  - Old daily USB profile kept as EFI/OC/config-gpu-v2.plist.
+
+v9.4 - Bluetooth map, real mute, power button, two-finger tap, REAL OLED brightness (trial)
+  - USB port map (USBMap-UX325EA.kext, all profiles): Bluetooth (port HS10), webcam (HS06)
+    and HS04 are now INTERNAL. macOS treated the Bluetooth chip as an external USB stick and
+    bluetoothd failed to start it ("OI_HciIfc_Init_USB Initialization failed").
+    Bluetooth also needs a COLD start after Windows: Shut Down, then power on (no Restart).
+  - ZenBookHelper 8.9: mute key really silences the speakers (volume saved/restored),
+    power button press = sleep (like a MacBook), two-finger tap = left click fixed
+    (tap-to-click could stay switched off after the NumberPad was used).
+  - Microphone: the built-in mic is a digital mic wired to Intel's audio DSP, which macOS
+    cannot drive. Use a headset (audio jack), Bluetooth or USB microphone.
+  - REAL OLED brightness = GPU driver v3 (WhateverXe-UX325-v3.kext, -wex-tgl-edp-bl): the
+    panel's own brightness over DPCD (VESA eDP), like Apple's own panels. Try it once:
+        sh "/Volumes/Install macOS Sonoma/fix-hardware.sh" --gpu-trial   -> restart
+    The boot after the trial is your normal setup again. Happy?  --gpu-trial-keep
+  - The daily profile is GPU acceleration again (it had been switched to the safe profile).
+
+v9.3 - BOOTS LIKE A REAL MAC (no menu) + boot without the USB
+  - No boot menu: power on -> Apple logo -> macOS (the Startup Disk choice).
+    Hold Option (Alt) while turning on = boot menu (Windows, rescue).
+  - Set the default once: System Settings > General > Startup Disk > macOS > Restart.
+  - Boot without USB:  sudo sh "/Volumes/Install macOS Sonoma/sync-efi-to-ssd.sh" --launcher-full
+    then shut down, unplug the USB, power on tapping Esc, choose the internal SSD entry
+    (NOT Windows Boot Manager) ONCE. OpenCore adds itself as the first boot option.
+  - Keep this USB as the rescue stick (Esc at power-on -> choose the USB).
+  - Previous settings: UX325EA-RESCUE/BACKUPS/pre-macboot-*
 
 v9.2 - GPU ACCELERATION WORKS (Iris Xe, Metal, 1920x1080 30-bit) - now the daily profile
   - Clean boot: Apple logo (no -v text), diagnostic tracing removed. Debug profile kept in

@@ -1,15 +1,19 @@
 # ASUS ZenBook 13 OLED (UX325EA) — macOS Sonoma Hackintosh with Iris Xe acceleration
 
-OpenCore EFI, helper tools and a **patched WhateverXe driver** that gives the
-ZenBook 13 OLED (UX325EA, Intel Core i7‑1165G7, Iris Xe 96 EU, Samsung OLED panel)
-**full Metal graphics acceleration on macOS Sonoma 14.8.9**, together with working
-Wi‑Fi, Apple ID, Fn hotkeys, keyboard backlight, NumberPad and trackpad gestures.
+OpenCore EFI, ACPI patches, helper tools and **patched drivers** for the ZenBook 13 OLED
+(UX325EA, Intel Core i7‑1165G7, Iris Xe 96 EU, Samsung OLED). It gives **full Metal graphics
+acceleration on macOS Sonoma 14.8.9** and **real OLED brightness**, with the Control Centre slider
+and native keys. It also makes these work: Wi‑Fi, Bluetooth, sleep with the lid or the power
+button, every Fn key (including after sleep), the keyboard backlight, the NumberPad and
+trackpad gestures.
 
-Before the patch the internal OLED stayed **black** as soon as the Tiger Lake graphics
-driver loaded. The cause turned out to be a bug in Apple's own Tiger Lake framebuffer
-driver: it programmed the panel from uninitialized memory. See
-[docs/IRIS-XE-BLACK-SCREEN-FIX.md](docs/IRIS-XE-BLACK-SCREEN-FIX.md) for the
-full investigation.
+Before these patches:
+* the internal OLED stayed **black** as soon as the Tiger Lake graphics driver loaded (a bug in
+  Apple's own framebuffer driver, see [docs/IRIS-XE-BLACK-SCREEN-FIX.md](docs/IRIS-XE-BLACK-SCREEN-FIX.md));
+* the brightness keys did nothing (an OLED has no PWM backlight);
+* volume and mute died after every sleep.
+
+See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 
 > ⚠️ **Do not use the `PlatformInfo` values as-is.** The serial number, MLB, UUID and
 > ROM in every `config*.plist` are placeholders (`W00000000001`, …). Generate your own
@@ -23,23 +27,27 @@ full investigation.
 | Component | Model | Driver / method | Status |
 |---|---|---|---|
 | CPU | Intel Core i7‑1165G7 (Tiger Lake) | SSDT‑PLUG, CpuTscSync, `revcpu`/RestrictEvents | ✅ |
-| GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit |
+| GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.3**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit |
 | Display | Samsung OLED eDP 1.4 (ATNA33XC11), 2 lanes | patched link setup (2 × 2.7 Gbps) | ✅ |
-| Brightness | OLED (no PWM backlight) | ZenBookHelper overlay dimming on Fn+F4/F5 | ✅ (no native slider yet) |
-| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) | ✅ |
-| Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup | driver installed |
-| Audio | Realtek ALC294 | AppleALC 1.9.8, `alcid=11` | driver installed |
-| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, BrightnessKeys, **SSDT‑KBL** | ✅ |
+| Brightness | OLED, Intel DPCD nits interface | patch `-wex-tgl-edp-bl` + **SSDT‑PNLF `_UID` 19** | ✅ real panel brightness, Control Centre slider, Fn+F4/F5, bezel, 0 = black |
+| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ |
+| Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
+| Audio | Realtek ALC294 | AppleALC 1.9.8, `alcid=11`; helper enforces mute | ✅ speakers, headphones; mute/unmute with bezel |
+| Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
+| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑WAKE** | ✅ brightness, volume, mute — also after sleep |
 | Keyboard backlight | EC | **SSDT‑KBL** (Fn+F7 cycles 0→3) | ✅ |
-| Trackpad + NumberPad | ELAN I2C HID (04F3:3134) | VoodooI2C/HID + **ZenBookHelper** | ✅ tap, two‑finger, right click, NumberPad LEDs, calculator |
-| SD card reader | Realtek PCIe | RealtekCardReader | driver installed |
-| NVMe | SK hynix PC711 | PC711Probe (MSI‑X fix) | ✅ |
-| Battery | EC | SMCBatteryManager, ECEnabler | driver installed |
+| Trackpad + NumberPad | ELAN I2C HID (04F3:3134) | VoodooI2C/HID + **ZenBookHelper** | ✅ tap, two‑finger menu, gestures, NumberPad + calculator |
+| Sleep / wake | S3 | power button → sleep (helper), lid, password after wake | ✅ power button; lid: fix in v10.0 (driver v4.3 + helper 8.15) |
+| Shut Down | — | `SSDT-WAKE` (XHCI PME off) | ✅ apps close, then off |
+| Webcam | USB (HS06, internal) | USB map | ✅ |
+| SD card reader | Realtek PCIe | RealtekCardReader(Friend) | driver installed |
+| NVMe | SK hynix PC711 | PC711Probe | ✅ |
+| Battery | EC | SMCBatteryManager, ECEnabler | ✅ |
 | Apple ID / iCloud | — | valid SMBIOS + Wi‑Fi as built‑in `en0` | ✅ (with your own SMBIOS) |
 
-**Not possible on macOS:** Windows Hello IR face login, Thunderbolt 4 hot‑plug of PCIe
-devices (docks / eGPU).
-**Not yet tested with the GPU driver:** sleep/wake, external HDMI/USB‑C monitors.
+**Not possible on macOS:** built‑in microphone (Intel DSP), Windows Hello IR face login,
+Thunderbolt 4 hot‑plug of PCIe devices (docks / eGPU).
+**Not tested:** external HDMI / USB‑C monitors.
 
 Software: OpenCore **1.0.8**, macOS **Sonoma 14.8.9 (23J631)** — WhateverXe 0.8.3 needs
 exactly this build. `SecureBootModel=Disabled`, `DmgLoading=Any`. Dual boot with Windows on
@@ -50,24 +58,22 @@ the same SSD is supported (the sync script never touches `\EFI\Microsoft`).
 ## Repository layout
 
 ```
-EFI/                       OpenCore EFI (copy to the USB / SSD EFI partition)
-  OC/config.plist          daily profile = GPU acceleration ON  (same as config-gpu.plist)
-  OC/config-gpu.plist      GPU profile
-  OC/config-stable.plist   safe profile: framebuffer-only (-wexoff), no acceleration
-  OC/Kexts/WhateverXe-UX325.kext   patched WhateverXe build (source: src/WhateverXe-UX325)
-usb-kit/                   tools that live on the USB's data partition
-  fix-hardware.sh          one script: apply fixes, --audit, --gpu-test/--gpu-keep/--gpu-off/--gpu-report
-  sync-efi-to-ssd.sh       copy the EFI to the internal SSD (boot without USB), Windows-safe
-  GPU-OFF.command          double-click from any Mac: back to the safe profile
-  ZenBookHelper.app        brightness overlay, NumberPad, trackpad click modes, Wi-Fi watchdog
-  UX325EA-RESCUE/GPU/gpu-guard.sh   one-boot GPU test guard with automatic rollback + diagnostics
-  README.txt               end-user guide and full change log
-src/
-  ACPI/                    SSDT-KBL (Fn hotkeys, keyboard backlight), SSDT-PNLF
-  ZenBookHelper/           Objective-C source + build script (universal, stable code signature)
-  WhateverXe-UX325/        patch against WhateverXe 0.8.3, unit-test harness, license
-docs/IRIS-XE-BLACK-SCREEN-FIX.md   root-cause analysis of the black screen
-extras/config-gpu-debug.plist      GPU profile with verbose boot + display tracing
+EFI/OC/config.plist          daily profile: GPU acceleration + every fix (= config-gpu.plist)
+EFI/OC/config-gpu.plist      the same (used by fix-hardware.sh --gpu-keep / the GPU guard)
+EFI/OC/config-stable.plist   safe profile: same fixes, no acceleration (-wexoff), verbose boot
+EFI/OC/ACPI/                 SSDT-KBL (Fn keys, keyboard light), SSDT-PNLF (_UID 19),
+                             SSDT-WAKE (volume/mute route, ATK queue, wake/shutdown hooks), ...
+EFI/OC/Kexts/WhateverXe-UX325-v4.kext   patched WhateverXe (src/WhateverXe-UX325)
+EFI/OC/Kexts/BrightnessKeys-UX325.kext  BrightnessKeys 1.0.3 + volume/mute codes (src/BrightnessKeys-UX325)
+EFI/OC/Kexts/USBMap-UX325EA.kext        codeless USB map: Bluetooth (HS10) + webcam (HS06) internal
+usb-kit/                     tools for the USB's data partition
+  fix-hardware.sh            apply fixes, --test (guided test + report), --audit, --diagnose, --gpu-*
+  sync-efi-to-ssd.sh         copy the EFI to the internal SSD (boot without USB), Windows-safe
+  ZenBookHelper.app          power button, mute, NumberPad, wake brightness, Wi-Fi watchdog
+  UX325EA-RESCUE/GPU/gpu-guard.sh   one-boot GPU test guard with automatic rollback
+  README.txt                 end-user guide and full change log
+src/                         ACPI sources, driver patches + test harnesses, helper source, USB map
+docs/                        root-cause write-ups
 ```
 
 ---
@@ -84,22 +90,22 @@ extras/config-gpu-debug.plist      GPU profile with verbose boot + display traci
    ```sh
    sh "/Volumes/<USB>/fix-hardware.sh"
    ```
-   Switch on *Input Monitoring* and *Accessibility* for **ZenBookHelper** when asked, restart.
-6. Enable GPU acceleration:
-   - download **WhateverXe Graphics 0.4.4** from the
-     [WhateverXe releases](https://github.com/b00t0x/WhateverXe/releases) and place the
-     `.pkg` in `usb-kit/UX325EA-RESCUE/GPU/` (not included: it contains Apple binaries);
-   - `sh fix-hardware.sh --gpu-test` → restart. The guard boots the GPU profile **once**;
-     if the screen stays black it records diagnostics and restarts into the safe profile
-     automatically. If the screen works, click **Keep**, then run `--gpu-keep`.
-7. Boot like a real Mac, without the USB:
-   - System Settings → General → **Startup Disk** → choose macOS → Restart (sets the default);
-   - `sudo sh sync-efi-to-ssd.sh --launcher-full` (try `--dry-run` first) copies the EFI to the
-     internal SSD and keeps `\EFI\Microsoft` untouched;
-   - shut down, unplug the USB, power on tapping **Esc** and pick the internal SSD entry once —
-     OpenCore registers itself as the first firmware boot option.
-   The boot menu is hidden (`ShowPicker=false`): power on → Apple logo → macOS. Hold
-   **Option (Alt)** at power-on for the menu (Windows, recovery, rescue).
+   Switch on *Input Monitoring* and *Accessibility* for **ZenBookHelper** when asked, then restart.
+6. GPU acceleration: download **WhateverXe Graphics 0.4.4** from the
+   [WhateverXe releases](https://github.com/b00t0x/WhateverXe/releases) and place the `.pkg` in
+   `usb-kit/UX325EA-RESCUE/GPU/` (not included: it contains Apple binaries). Then run
+   `sh fix-hardware.sh --gpu-test` and restart. The guard boots the GPU profile **once**: if the
+   screen stays black, it records diagnostics and returns to the safe profile by itself. If the
+   screen works, click **Keep**.
+7. Test everything from the USB: `sh fix-hardware.sh --test` guides brightness, slider, volume,
+   mute, two-finger menu, lid and power-button sleep, Wi-Fi, and saves a report. When it says
+   **EVERYTHING WORKS**:
+   ```sh
+   sudo sh "/Volumes/<USB>/sync-efi-to-ssd.sh" --launcher-full
+   ```
+   This copies the setup to the internal SSD and leaves `\EFI\Microsoft` untouched. Shut down,
+   unplug the USB and power on: Apple logo → macOS, like a real Mac. Hold **Option (Alt)** at
+   power-on for the boot menu (Windows, recovery).
 
 Rollback at any time: `fix-hardware.sh --gpu-off`, or double-click `GPU-OFF.command` from
 another Mac.
@@ -109,31 +115,15 @@ another Mac.
 
 ---
 
-## The GPU fix in one paragraph
-
-With WhateverXe on this laptop, `AppleIntelFramebuffer::setDisplayMode()` passes
-`hwSetMode()` a stack buffer that only `setupDisplayTiming()` fills. That function asks the
-AGDC graphics policy for a link mode (event 0xC). On this machine the query fails every
-time, and the function returns **without writing the timing**. Apple's driver then programs
-the pipe from leftover stack memory. The result: garbage pixel clock → failed lane
-computation → 4‑lane training on a 2‑lane panel, a divide‑error panic in `SetupTimings`,
-and `IOAccelDisplayPipeTransaction time out` followed by a WindowServer watchdog panic.
-The patch pre‑fills the output with the real mode timing (`-wex-tgl-edp-timing`). It also
-caps the link rate at the panel's own `MAX_LINK_RATE`, because Apple writes `LINK_BW_SET`
-with the eDP 1.4 rate‑table maximum (`-wex-tgl-edp-lanes`). Verified on hardware: all
-5 mode‑sets rescued, 140.12 MHz 1920×1080, 2 lanes × 2.7 Gbps, Metal working.
-
----
-
 ## Credits
 
 - [OpenCore](https://github.com/acidanthera/OpenCorePkg), Lilu, VirtualSMC, AppleALC,
-  RestrictEvents, FeatureUnlock, CpuTscSync, DebugEnhancer, NVMeFix — Acidanthera
+  RestrictEvents, FeatureUnlock, CpuTscSync, DebugEnhancer, NVMeFix, BrightnessKeys, VoodooPS2 — Acidanthera
 - [WhateverXe](https://github.com/b00t0x/WhateverXe), AMFIAnchor — b00t0x (BSD‑3‑Clause;
   see `src/WhateverXe-UX325/LICENSE-WhateverXe.txt`)
 - [OpenIntelWireless](https://github.com/OpenIntelWireless) — AirportItlwm, IntelBluetoothFirmware
-- [VoodooI2C](https://github.com/VoodooI2C/VoodooI2C), VoodooPS2 — VoodooI2C / Acidanthera
-- AsusSMC, BrightnessKeys, ECEnabler, RealtekCardReader(Friend), PC711Probe — their respective authors
+- [VoodooI2C](https://github.com/VoodooI2C/VoodooI2C) — VoodooI2C / Acidanthera
+- AsusSMC, ECEnabler, RealtekCardReader(Friend), PC711Probe — their respective authors
 - [Dortania guides](https://dortania.github.io/OpenCore-Install-Guide/)
 
 Third-party kexts and drivers keep their own licenses. This project is not affiliated with

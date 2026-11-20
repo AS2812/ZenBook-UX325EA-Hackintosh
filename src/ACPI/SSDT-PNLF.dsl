@@ -13,7 +13,7 @@ DefinitionBlock ("", "SSDT", 2, "ACDT", "PNLF", 0x00000000)
                 {
                     Name (_HID, EisaId ("APP0002"))
                     Name (_CID, "backlight")
-                    Name (_UID, 0x18)
+                    Name (_UID, 0x13)  // 19: WhateverXe adds the 16-bit (0..65535) brightness curve for this UID
                     Name (_STA, 0x0B)
                 }
             }
@@ -26,7 +26,7 @@ DefinitionBlock ("", "SSDT", 2, "ACDT", "PNLF", 0x00000000)
                 {
                     Name (_HID, EisaId ("APP0002"))
                     Name (_CID, "backlight")
-                    Name (_UID, 0x18)
+                    Name (_UID, 0x13)  // 19: WhateverXe adds the 16-bit (0..65535) brightness curve for this UID
                     Name (_STA, 0x0B)
                 }
             }

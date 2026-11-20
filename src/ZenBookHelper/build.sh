@@ -7,7 +7,7 @@ rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
 cp Info.plist "$APP/Contents/Info.plist"; printf 'APPL????' > "$APP/Contents/PkgInfo"
 for arch in x86_64 arm64; do
   clang -arch $arch -mmacosx-version-min=12.0 -fobjc-arc -O2 -Wall -Wno-unused-variable \
-    -framework Cocoa -framework Carbon -framework ApplicationServices -framework IOKit -framework CoreWLAN \
+    -framework Cocoa -framework Carbon -framework ApplicationServices -framework IOKit -framework CoreWLAN -framework CoreAudio -framework AudioToolbox \
     ZenBookHelper.m -o ZenBookHelper.$arch
 done
 lipo -create ZenBookHelper.x86_64 ZenBookHelper.arm64 -output "$APP/Contents/MacOS/ZenBookHelper"

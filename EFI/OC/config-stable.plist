@@ -70,6 +70,14 @@
 				<key>Path</key>
 				<string>SSDT-KBL.aml</string>
 			</dict>
+			<dict>
+				<key>Comment</key>
+				<string>v9.8: ASUS hotkeys after sleep (queue self-heal + INIT on wake) + shutdown USB-wake fix</string>
+				<key>Enabled</key>
+				<true/>
+				<key>Path</key>
+				<string>SSDT-WAKE.aml</string>
+			</dict>
 		</array>
 		<key>Delete</key>
 		<array/>
@@ -179,6 +187,123 @@
 				<key>Replace</key>
 				<data>
 				WFJUTgk=
+				</data>
+				<key>ReplaceMask</key>
+				<data>
+				</data>
+				<key>Skip</key>
+				<integer>0</integer>
+				<key>TableLength</key>
+				<integer>0</integer>
+				<key>TableSignature</key>
+				<data>
+				RFNEVA==
+				</data>
+			</dict>
+			<dict>
+				<key>Base</key>
+				<string></string>
+				<key>BaseSkip</key>
+				<integer>0</integer>
+				<key>Comment</key>
+				<string>Rename XPTS to YPTS (ASUS empty XPTS hook (called by _PTS) -&gt; SSDT-WAKE)</string>
+				<key>Count</key>
+				<integer>1</integer>
+				<key>Enabled</key>
+				<true/>
+				<key>Find</key>
+				<data>
+				FAZYUFRTAQ==
+				</data>
+				<key>Limit</key>
+				<integer>0</integer>
+				<key>Mask</key>
+				<data>
+				</data>
+				<key>OemTableId</key>
+				<data>
+				</data>
+				<key>Replace</key>
+				<data>
+				FAZZUFRTAQ==
+				</data>
+				<key>ReplaceMask</key>
+				<data>
+				</data>
+				<key>Skip</key>
+				<integer>0</integer>
+				<key>TableLength</key>
+				<integer>0</integer>
+				<key>TableSignature</key>
+				<data>
+				RFNEVA==
+				</data>
+			</dict>
+			<dict>
+				<key>Base</key>
+				<string></string>
+				<key>BaseSkip</key>
+				<integer>0</integer>
+				<key>Comment</key>
+				<string>Rename XWAK to YWAK (ASUS empty XWAK hook (called by _WAK) -&gt; SSDT-WAKE)</string>
+				<key>Count</key>
+				<integer>1</integer>
+				<key>Enabled</key>
+				<true/>
+				<key>Find</key>
+				<data>
+				FAZYV0FLAQ==
+				</data>
+				<key>Limit</key>
+				<integer>0</integer>
+				<key>Mask</key>
+				<data>
+				</data>
+				<key>OemTableId</key>
+				<data>
+				</data>
+				<key>Replace</key>
+				<data>
+				FAZZV0FLAQ==
+				</data>
+				<key>ReplaceMask</key>
+				<data>
+				</data>
+				<key>Skip</key>
+				<integer>0</integer>
+				<key>TableLength</key>
+				<integer>0</integer>
+				<key>TableSignature</key>
+				<data>
+				RFNEVA==
+				</data>
+			</dict>
+			<dict>
+				<key>Base</key>
+				<string></string>
+				<key>BaseSkip</key>
+				<integer>0</integer>
+				<key>Comment</key>
+				<string>Rename ATKD.IANE to XANE (ASUS hotkey queue self-heal -&gt; SSDT-WAKE)</string>
+				<key>Count</key>
+				<integer>1</integer>
+				<key>Enabled</key>
+				<true/>
+				<key>Find</key>
+				<data>
+				SUFORQk=
+				</data>
+				<key>Limit</key>
+				<integer>0</integer>
+				<key>Mask</key>
+				<data>
+				</data>
+				<key>OemTableId</key>
+				<data>
+				</data>
+				<key>Replace</key>
+				<data>
+				WEFORQk=
 				</data>
 				<key>ReplaceMask</key>
 				<data>
@@ -370,6 +495,42 @@
 				<key>Arch</key>
 				<string>x86_64</string>
 				<key>BundlePath</key>
+				<string>AMFIAnchor.kext</string>
+				<key>Comment</key>
+				<string>AMFIAnchor 0.1.2 (WhateverXe Graphics signing CA)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/AMFIAnchor</string>
+				<key>MaxKernel</key>
+				<string>25.99.99</string>
+				<key>MinKernel</key>
+				<string>20.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>AMFIAnchorInjector.kext</string>
+				<key>Comment</key>
+				<string>AMFIAnchorInjector (b00t0x CA anchor)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string></string>
+				<key>MaxKernel</key>
+				<string>25.99.99</string>
+				<key>MinKernel</key>
+				<string>20.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
 				<string>PC711Probe.kext</string>
 				<key>Comment</key>
 				<string>SK Hynix PC711 / BC711 NVMe MSI-X fix</string>
@@ -442,11 +603,11 @@
 				<key>Arch</key>
 				<string>x86_64</string>
 				<key>BundlePath</key>
-				<string>WhateverXe.kext</string>
+				<string>WhateverXe-UX325-v4.kext</string>
 				<key>Comment</key>
-				<string>WhateverXe.kext</string>
+				<string>WhateverXe 0.8.3 + UX325EA v4: timing, 2xHBR link, OLED brightness (Intel nits DPCD 0x354, -wex-tgl-edp-bl)</string>
 				<key>Enabled</key>
-				<false/>
+				<true/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/WhateverXe</string>
 				<key>MaxKernel</key>
@@ -462,9 +623,9 @@
 				<key>BundlePath</key>
 				<string>AMFIPass.kext</string>
 				<key>Comment</key>
-				<string>AMFIPass.kext</string>
+				<string>replaced by AMFIAnchor in GPU profile</string>
 				<key>Enabled</key>
-				<true/>
+				<false/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/AMFIPass</string>
 				<key>MaxKernel</key>
@@ -532,9 +693,9 @@
 				<key>Arch</key>
 				<string>x86_64</string>
 				<key>BundlePath</key>
-				<string>BrightnessKeys.kext</string>
+				<string>BrightnessKeys-UX325.kext</string>
 				<key>Comment</key>
-				<string>BrightnessKeys.kext</string>
+				<string>BrightnessKeys 1.0.3 + volume/mute ACPI codes 0x90-0x92 (v9.9)</string>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>
@@ -888,6 +1049,24 @@
 				<key>PlistPath</key>
 				<string>Contents/Info.plist</string>
 			</dict>
+			<dict>
+				<key>Arch</key>
+				<string>Any</string>
+				<key>BundlePath</key>
+				<string>USBMap-UX325EA.kext</string>
+				<key>Comment</key>
+				<string>UX325EA USB port map: Bluetooth HS10, webcam HS06, HS04 internal</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string></string>
+				<key>MaxKernel</key>
+				<string></string>
+				<key>MinKernel</key>
+				<string></string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
 		</array>
 		<key>Block</key>
 		<array>
@@ -961,7 +1140,7 @@
 				<key>Comment</key>
 				<string>Block WhateverXe Lilu plugin</string>
 				<key>Enabled</key>
-				<true/>
+				<false/>
 				<key>Identifier</key>
 				<string>org.b00t0x.WhateverXe</string>
 				<key>MaxKernel</key>
@@ -977,7 +1156,7 @@
 				<key>Comment</key>
 				<string>Block TGL Compat kext</string>
 				<key>Enabled</key>
-				<true/>
+				<false/>
 				<key>Identifier</key>
 				<string>org.b00t0x.AppleIntelTGLCompat</string>
 				<key>MaxKernel</key>
@@ -1668,7 +1847,7 @@
 			<key>EnablePassword</key>
 			<false/>
 			<key>ExposeSensitiveData</key>
-			<integer>6</integer>
+			<integer>7</integer>
 			<key>HaltLevel</key>
 			<integer>2147483648</integer>
 			<key>PasswordHash</key>
@@ -1788,8 +1967,16 @@
 				<data>
 				Rg==
 				</data>
+				<key>bluetoothExternalDongleFailed</key>
+				<data>
+				AA==
+				</data>
+				<key>bluetoothInternalControllerInfo</key>
+				<data>
+				AAAAAAAAAAAAAAAAAAA=
+				</data>
 				<key>boot-args</key>
-				<string>-v keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -wexoff -novpanic alcid=11 -dbgenhdbg -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=US</string>
+				<string>-v keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -wexoff -novpanic alcid=11 -dbgenhdbg -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=US -btlfxallowanyaddr</string>
 				<key>csr-active-config</key>
 				<data>
 				AwgAAA==
@@ -1817,6 +2004,8 @@
 				<string>boot-args</string>
 				<string>ForceDisplayRotationInEFI</string>
 				<string>csr-active-config</string>
+				<string>bluetoothExternalDongleFailed</string>
+				<string>bluetoothInternalControllerInfo</string>
 			</array>
 		</dict>
 		<key>LegacyOverwrite</key>

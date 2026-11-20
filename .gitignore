@@ -6,3 +6,8 @@ usb-kit/UX325EA-RESCUE/BACKUPS/
 src/WhateverXe-UX325/extracted.inc
 src/WhateverXe-UX325/harness
 src/ZenBookHelper/ZenBookHelper.app/
+src/BrightnessKeys-UX325/work/
+src/WhateverXe-UX325/test4/harness4
+src/WhateverXe-UX325/test4/*.inc
+src/WhateverXe-UX325/test4/kern_edp_aux_backlight.hpp
+*.dSYM/

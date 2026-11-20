@@ -77,5 +77,7 @@
 	</dict>
 	<key>OSBundleRequired</key>
 	<string>Console</string>
+	<key>UX325Build</key>
+	<string>1.0.3 + volume/mute ACPI codes 0x90-0x92 (ZenBook UX325EA)</string>
 </dict>
 </plist>

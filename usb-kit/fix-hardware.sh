@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Master Hardware & Performance Fixes v9.1
+# ASUS ZenBook 13 OLED (UX325EA) - Master Hardware & Performance Fixes v10.0
 # (Wi-Fi + Apple ID + Fn+F4/F5 OLED dimming + NumberPad/Calculator + Trackpad + Audit)
 # Every run saves its output to UX325EA-RESCUE/TEST-RESULTS on the USB.
 #
@@ -41,7 +41,7 @@
 # ==============================================================================
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-VERSION="9.1"
+VERSION="10.0"
 
 MODE="apply"; DNS_MODE="dhcp"; DO_NET=1; FORCE_NETRESET=0; NEED_REBOOT=0
 for a in "$@"; do
@@ -49,8 +49,12 @@ for a in "$@"; do
         --probe|-p)  MODE="probe" ;;
         --audit|-a)  MODE="audit" ;;
         --collect)   MODE="collect" ;;
+        --diagnose)  MODE="diagnose" ;;
+        --test)      MODE="usbtest" ;;
         --numpad-probe|--led-test) MODE="led-test" ;;
         --gpu-test)  MODE="gpu-test" ;;
+        --gpu-trial) MODE="gpu-trial" ;;
+        --gpu-trial-keep) MODE="gpu-trial-keep" ;;
         --gpu-keep)  MODE="gpu-keep" ;;
         --gpu-off)   MODE="gpu-off" ;;
         --gpu-report) MODE="gpu-report" ;;
@@ -152,6 +156,206 @@ if [ "$MODE" = "collect" ]; then
     echo ""; echo "[*] Saved to $RESULTS - plug the USB into the other Mac and tell Claude."
     exit 0
 fi
+if [ "$MODE" = "diagnose" ]; then
+    # Read-only, guided data capture for sound / Bluetooth / power button / sleep / USB-C.
+    mkdir -p "$RESULTS"; OUT="$RESULTS/diagnose-$TS.txt"; : > "$OUT"
+    sec() { echo "" >> "$OUT"; echo "==================== $* ====================" >> "$OUT"; }
+    run() { sec "$1"; shift; "$@" >> "$OUT" 2>&1; }
+    stamp() { /bin/date '+%Y-%m-%d %H:%M:%S'; }
+    LIVE='process == "kernel" OR process == "powerd" OR process == "loginwindow" OR process == "coreaudiod" OR process == "bluetoothd" OR process == "WindowServer" OR process == "ZenBookHelper" OR process == "SystemUIServer" OR process == "ControlCenter"'
+    step() {   # step "label" "instruction"
+        local t0; echo ""; echo "------------------------------------------------------------"; echo ">>> $2"
+        t0="$(stamp)"; printf "    Press Enter here when done... "; read -r _ < /dev/tty
+        sec "LIVE: $1 ($t0 .. $(stamp))"
+        /usr/bin/log show --start "$t0" --style compact --predicate "$LIVE" 2>/dev/null | grep -vE 'com.apple.xpc|Sandbox|sandbox' | tail -400 >> "$OUT"
+        tail -40 "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | sed 's/^/[helper] /' >> "$OUT"
+    }
+    echo ""; echo "[*] ZenBook diagnose: about 3 minutes. Nothing is changed on this Mac."
+    echo "    Step 1/2: collecting system information..."
+    run "system" sw_vers; run "boot-args" nvram boot-args
+    run "kexts" sh -c "kmutil showloaded 2>/dev/null | grep -iE 'ALC|HDA|Bluetooth|BlueTool|IntelBT|Voodoo|AsusSMC|Brightness|Realtek|SMC|Lilu|WhateverXe|USB' | awk '{print \$6, \$7}'"
+    run "audio devices" system_profiler SPAudioDataType
+    run "audio ioreg (HDEF/codec)" sh -c "ioreg -rxn HDEF -l -w0 2>/dev/null | grep -E 'layout-id|alc-|AAPL|device-id|vendor-id|IOName|class-code|subsystem' | head -40; ioreg -l -w0 2>/dev/null | grep -E '\"IOHDACodec(VendorID|RevisionID|Address)\"|\"layout-id\"|\"alc-layout-id\"|\"PinConfigurations\"|AppleHDAEngine(Input|Output)|\"IOAudioEngineDescription\"|\"IOAudioDeviceName\"' | head -60"
+    run "audio kernel log (this boot)" sh -c "/usr/bin/log show --last boot --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"AppleALC\" OR eventMessage CONTAINS[c] \"AppleHDA\" OR eventMessage CONTAINS[c] \"HDA\")' 2>/dev/null | tail -80"
+    run "bluetooth" system_profiler SPBluetoothDataType
+    run "bluetooth nvram" sh -c "nvram -p 2>/dev/null | grep -i bluetooth"
+    run "bluetooth kernel log (this boot)" sh -c "/usr/bin/log show --last boot --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"Bluetooth\" OR eventMessage CONTAINS[c] \"IntelBT\" OR eventMessage CONTAINS[c] \"BlueTool\" OR eventMessage CONTAINS[c] \"8087\")' 2>/dev/null | tail -120"
+    run "bluetoothd errors (this boot)" sh -c "/usr/bin/log show --last boot --style compact --predicate 'process == \"bluetoothd\" AND (messageType == error OR messageType == fault)' 2>/dev/null | tail -80"
+    run "USB tree" ioreg -p IOUSB -w0
+    run "USB devices detail" sh -c "ioreg -p IOUSB -l -w0 2>/dev/null | grep -E '\+-o|\"idVendor\"|\"idProduct\"|\"locationID\"|\"USB Product Name\"|\"Device Speed\"|\"UsbConnector\"' "
+    run "USB / Thunderbolt controllers" sh -c "ioreg -rc IOPCIDevice -w0 -l 2>/dev/null | grep -E '\+-o (XHC|TXHC|TDM|TRP|TBT|RP0|PXSX|XDCI)|\"device-id\" = <(13|ed|1b|1d|2f|31|33|35|36)9a|\"compatible\"' | head -60; system_profiler SPUSBDataType SPThunderboltDataType"
+    run "power settings" sh -c "pmset -g; echo; pmset -g cap; echo; pmset -g assertions"
+    run "sleep/wake history" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure|Shutdown|Start) ' | tail -80"
+    run "power button / lid ACPI" sh -c "ioreg -rxn PWRB -w0 2>/dev/null | head -20; ioreg -rxn LID0 -w0 2>/dev/null | head -20; ioreg -r -k AppleClamshellState -d 1 -w0 2>/dev/null | grep -E 'Clamshell|SleepDisabled'"
+    run "displays" system_profiler SPDisplaysDataType
+    echo "    Step 2/2: short live tests. Do each one, then press Enter."
+    step "power-button" "Press the POWER button ONCE, briefly (do not hold it). If the screen goes off, wake it, log in, then continue."
+    step "mute-key" "Play any sound (e.g. a YouTube video). Press the MUTE key (Fn+F1) once, wait 3 s, press it again."
+    step "volume-keys" "Press volume down (Fn+F2) twice, then volume up (Fn+F3) twice."
+    step "microphone" "Open System Settings > Sound > Input. Speak for 5 seconds and watch the input level bars."
+    step "bluetooth" "Click the Bluetooth icon in the menu bar (or System Settings > Bluetooth) and try to turn Bluetooth ON."
+    run "bluetooth after test" system_profiler SPBluetoothDataType
+    run "USB before plug" ioreg -p IOUSB -w0
+    step "usb-c" "Plug a USB-C device (phone cable, USB-C stick or adapter) into a USB-C port, wait 10 s."
+    run "USB after plug" sh -c "ioreg -p IOUSB -w0; system_profiler SPUSBDataType"
+    step "lid" "Close the lid, wait 20 seconds, open it again and log in."
+    run "sleep/wake after lid test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -20"
+    echo ""; printf "  Quick answers (type and press Enter):\n"
+    printf "  Did the POWER button do anything? (nothing / screen off / sleep / menu): "; read -r A1 < /dev/tty
+    printf "  Did MUTE silence the sound? (yes/no): "; read -r A2 < /dev/tty
+    printf "  Microphone level bars moved? (yes/no): "; read -r A3 < /dev/tty
+    printf "  Lid: did it sleep and wake correctly? (yes/no/black screen): "; read -r A4 < /dev/tty
+    printf "  USB-C device worked? (yes/no/not tested): "; read -r A5 < /dev/tty
+    sec "user answers"; printf "power=%s\nmute=%s\nmic=%s\nlid=%s\nusbc=%s\n" "$A1" "$A2" "$A3" "$A4" "$A5" >> "$OUT"
+    /bin/cp "$USER_HOME/Library/Logs/ZenBookHelper.log" "$RESULTS/helper-log-$TS.txt" 2>/dev/null
+    sync; echo ""; echo "[*] Saved to $OUT"
+    echo "    Eject the USB (right-click 'Install macOS Sonoma' > Eject) and bring it to the other Mac."
+    exit 0
+fi
+if [ "$MODE" = "usbtest" ]; then
+    # USB test bench: boot with the USB plugged in (it starts the newest test setup), run this,
+    # do the short tests, then eject and bring the USB back. Unplugged = the normal SSD setup.
+    mkdir -p "$RESULTS"; OUT="$RESULTS/test-$TS.txt"; : > "$OUT"
+    sec() { echo "" >> "$OUT"; echo "==================== $* ====================" >> "$OUT"; }
+    run() { sec "$1"; shift; "$@" >> "$OUT" 2>&1; }
+    stamp() { /bin/date '+%Y-%m-%d %H:%M:%S'; }
+    HB="$USER_HOME/Applications/ZenBookHelper.app/Contents/MacOS/ZenBookHelper"
+    LIVE='process == "kernel" OR process == "powerd" OR process == "coreaudiod" OR process == "bluetoothd" OR process == "ZenBookHelper"'
+    step() {
+        local t0; echo ""; echo "------------------------------------------------------------"; echo ">>> $2"
+        t0="$(stamp)"; printf "    Press Enter here when done... "; read -r _ < /dev/tty
+        sec "LIVE: $1 ($t0 .. $(stamp))"
+        /usr/bin/log show --start "$t0" --style compact --predicate "$LIVE" 2>/dev/null | grep -vE 'Sandbox|com.apple.xpc|wlan0|IO80211|corecapture|SPOwner|WirelessProximity' | tail -200 >> "$OUT"
+        awk -v t="$t0" 'substr($0,1,19) >= t' "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | tail -80 | sed 's/^/[helper] /' >> "$OUT"
+    }
+    # one key answers (y / n / other letter) - F-keys or arrows typed by mistake are ignored
+    ask() { local a=""; while :; do printf "  %s " "$1" > /dev/tty; read -r a < /dev/tty; a="$(printf '%s' "$a" | tr -cd 'a-zA-Z' | cut -c1 | tr A-Z a-z)"; [ -n "$a" ] && break; echo "    (type y or n, then Enter)" > /dev/tty; done; echo "$2=$a" >> "$ANS"; }
+    ANS="$RESULTS/.answers-$TS"; : > "$ANS"
+    echo ""; echo "[*] ZenBook USB test v$VERSION (about 4 minutes)"
+    # 0. how did the LAST shutdown end? (recorded by macOS at this boot)
+    sec "previous shutdown"
+    /usr/bin/log show --last boot --style compact --predicate 'eventMessage CONTAINS "Previous shutdown cause"' 2>/dev/null | grep -v noninteractively | tail -3 >> "$OUT"
+    echo "  (5 = normal shut down, 3 = power button held, 0/-128 = power lost or forced, -20/-60/-61/-62 = stall or watchdog)" >> "$OUT"
+    pmset -g log 2>/dev/null | grep -E ' (Shutdown|Restart|ShutdownCause|Sleep|Wake|Failure) ' | tail -8 >> "$OUT"
+    ls -lt /Library/Logs/DiagnosticReports/ 2>/dev/null | grep -iE 'shutdown|stall|panic|hang' | head -6 >> "$OUT"
+    # full stall reports (decoded on the other Mac) + what the system logged while it stalled
+    for f in $(ls -t /Library/Logs/DiagnosticReports/*hutdown*tall* 2>/dev/null | head -2); do
+        /bin/cp "$f" "$RESULTS/" 2>/dev/null || as_root /bin/cp "$f" "$RESULTS/" 2>/dev/null
+        echo "copied $(basename "$f")" >> "$OUT"
+    done
+    NEWEST="$(ls -t /Library/Logs/DiagnosticReports/*hutdown*tall* 2>/dev/null | head -1)"
+    if [ -n "$NEWEST" ]; then
+        STS="$(basename "$NEWEST" | grep -oE '20[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{6}')"
+        SE="$(/bin/date -j -f '%Y-%m-%d-%H%M%S' "$STS" '+%s' 2>/dev/null)"
+        if [ -n "$SE" ]; then
+            sec "log around the newest shutdown stall ($STS)"
+            /usr/bin/log show --style compact --start "$(/bin/date -r $((SE-120)) '+%Y-%m-%d %H:%M:%S')" --end "$(/bin/date -r $((SE+60)) '+%Y-%m-%d %H:%M:%S')" \
+                --predicate 'process == "kernel" OR process == "launchd" OR process == "shutdown" OR process == "loginwindow" OR process == "logd" OR process == "bluetoothd" OR process == "airportd"' 2>/dev/null \
+                | grep -vE 'Sandbox|com.apple.xpc|corecapture|SPOwner' | tail -400 >> "$OUT"
+        fi
+    fi
+    BT="$(sysctl -n kern.boottime 2>/dev/null | sed -E 's/^[{] sec = ([0-9]+),.*/\1/')"
+    if [ -n "$BT" ]; then
+        sec "previous shutdown timeline (15 min before this start)"
+        TL="$RESULTS/.timeline-$TS"
+        /usr/bin/log show --style compact --start "$(/bin/date -r $((BT-900)) '+%Y-%m-%d %H:%M:%S')" --end "$(/bin/date -r "$BT" '+%Y-%m-%d %H:%M:%S')" \
+            --predicate 'process == "loginwindow" OR process == "WindowServer" OR process == "corebrightnessd" OR process == "powerd" OR (process == "kernel" AND (eventMessage CONTAINS[c] "shutdown" OR eventMessage CONTAINS "UX325" OR eventMessage CONTAINS "IGFB" OR eventMessage CONTAINS "Corpse" OR eventMessage CONTAINS[c] "clamshell" OR eventMessage CONTAINS "Wake reason" OR eventMessage CONTAINS[c] "backlight"))' 2>/dev/null \
+            | grep -vE 'Sandbox|com.apple.xpc' > "$TL"
+        tail -450 "$TL" >> "$OUT"
+        rm -f "$TL"
+    fi
+    sec "lid / wake history (last 3 hours, all sessions)"
+    { pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -25
+      echo "--- driver + clamshell (kernel)"
+      /usr/bin/log show --last 3h --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "UX325" OR eventMessage CONTAINS[c] "clamshell" OR eventMessage CONTAINS "Wake reason")' 2>/dev/null | tail -60
+      echo "--- helper (wake checks)"
+      grep -E 'wake \+|wake: brightness|NSWorkspace(Did|Screens)Wake|power button' "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | tail -30; } >> "$OUT"
+    # 1. newest helper from the USB
+    HI="$USER_HOME/Applications/ZenBookHelper.app"; HU="$SCRIPT_DIR/ZenBookHelper.app"
+    VI="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$HI/Contents/Info.plist" 2>/dev/null)"
+    VU="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$HU/Contents/Info.plist" 2>/dev/null)"
+    if [ -d "$HU" ] && [ "$VI" != "$VU" ]; then
+        for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do launchctl bootout "gui/$TARGET_UID/$L" 2>/dev/null; done
+        rm -rf "$HI"; /bin/cp -R "$HU" "$HI"; xattr -dr com.apple.quarantine "$HI" 2>/dev/null; own "$HI"
+        for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
+            [ -f "$LAUNCH_DIR/$L.plist" ] && launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_DIR/$L.plist" 2>/dev/null
+        done
+        ok "ZenBookHelper updated ${VI:-?} -> $VU (permissions kept) - waiting 5 s for it to start"; sleep 5
+    else ok "ZenBookHelper $VI is current"; fi
+    # 2. like a MacBook: password right after sleep (lid or power button)
+    if ! sysadminctl -screenLock status 2>&1 | grep -q "immediate"; then
+        echo ""; echo "    Lock screen: ask for your password right after sleep (lid or power button)."
+        echo "    Type your LOGIN password when asked:"
+        as_user sysadminctl -screenLock immediate -password - 2>&1 | grep -viE "^$|^Enter" | sed 's/^.*\] /    /' | tail -2
+    fi
+    sysadminctl -screenLock status 2>&1 | grep -q "immediate" && ok "Password required immediately after sleep" || warn "Lock screen setting not changed - set it in System Settings > Lock Screen"
+    # 3. what is running (boot-path is exposed by the v9.7 test config; boot-args as a fallback)
+    BP="$(nvram 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path 2>/dev/null | cut -f2-)"
+    case "$BP" in
+        *USB*|*Pci\(0x14,0x0\)*) BOOTED="USB stick (test setup)" ;;
+        "") if nvram boot-args 2>/dev/null | grep -q -- '-wex-tgl-edp-bl'; then BOOTED="USB stick (test setup)"; else BOOTED="internal SSD (normal setup)"; fi ;;
+        *)  BOOTED="internal SSD (normal setup)" ;;
+    esac
+    echo "    Started from: $BOOTED"
+    run "boot" sh -c "echo 'started from: $BOOTED'; echo \"boot-path: $BP\"; sw_vers; nvram boot-args"
+    run "GPU + panel brightness driver" sh -c "system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Chipset|Metal|VRAM|Resolution|Depth'; ioreg -p IOService -l -w0 -d 1 2>/dev/null | grep -E '\"WEXTGLEDP[A-Za-z]*\"|WhateverXeBacklight'"
+    run "Control Centre brightness (PNLF 19 profile, display parameters)" sh -c "ioreg -l -w0 -n PNLF 2>/dev/null | grep -E '\"_UID\"' | head -2; ioreg -r -c AppleIntelPanel -w0 -l 2>/dev/null | grep -E 'WhateverXeBacklight' | cut -c1-200; ioreg -r -c AppleBacklightDisplay -w0 -l 2>/dev/null | grep -oE '\"(brightness|linear-brightness|usable-linear-brightness|bklt)\"=[{][^}]*[}]'"
+    sec "ACPI fixes loaded (1 = yes)"
+    AT="$(ioreg -l -w0 2>/dev/null | grep -m1 '"ACPI Tables"')"
+    { echo "SSDT-WAKE table: $(echo "$AT" | grep -c 5a454e424b0057414b45)"
+      echo "DSDT IANE->XANE: $(echo "$AT" | grep -c 58414e4509)  XWAK->YWAK: $(echo "$AT" | grep -c 5957414b01)  XPTS->YPTS: $(echo "$AT" | grep -c 5950545301)"
+      echo "ACPI table names: $(echo "$AT" | grep -oE '"[A-Z0-9-]{4,8}"=' | tr -d '"=' | tr '\n' ' ')"
+      echo "NHLT (audio DSP endpoints, for the microphone): $(echo "$AT" | grep -oE '"NHLT"=<[0-9a-f]*>' | cut -c1-6000)"
+      echo "BrightnessKeys: $(ioreg -r -c BrightnessKeys -l -w0 2>/dev/null | grep -oE '"(UX325VolumeKeys|BrightnessPanel|BrightnessKeyRouted)" = [^ ]*' | tr '\n' ' ')"
+      echo "BrightnessKeys build: $(kextstat -l 2>/dev/null | grep -i brightnesskeys | awk '{print $6, $7}')"
+      echo "--- ACPI messages at boot"; /usr/bin/log show --last boot --style compact --predicate 'process == "kernel" AND (eventMessage CONTAINS "ACPI" OR eventMessage CONTAINS "AE_")' 2>/dev/null | head -40; } >> "$OUT"
+    as_user "$HB" twofinger right >/dev/null 2>&1
+    run "helper status" as_user "$HB" status
+    run "audio before" as_user "$HB" audio
+    [ "$BOOTED" = "internal SSD (normal setup)" ] && warn "This Mac started from the SSD. For the test setup: Shut Down, then power on WITH the USB plugged in."
+    echo ""; echo "    First a question about your LAST shutdown (before this start):"
+    ask "BEFORE this test you closed and opened the lid: did the screen come back? (y/n):" lid_before_test
+    echo "    Now do each short test, then press Enter."
+    step "brightness keys" "Press Fn+F4 (darker) and Fn+F5 (brighter) several times (at 0 the screen is black, like before)."
+    step "volume" "Play a sound. Press volume UP (Fn+F3) 3 times and volume DOWN (Fn+F2) 3 times."
+    step "brightness slider" "Click Control Centre (top-right, the two-switches icon), drag the DISPLAY slider left and right, then close it."
+    step "mute" "Play a sound or video. Press MUTE (Fn+F1) once, wait 3 s, press it again. You should see the crossed speaker, then the speaker with bars."
+    run "audio after mute test" as_user "$HB" audio
+    step "two-finger" "Tap with TWO fingers on the desktop: the menu should open (like a Mac). Press Esc. Do it 3 times."
+    step "lid" "Close the lid, wait 20 seconds, open it. Wait 10 s. If it stays black: press a key, then the power button once. Log in, press Fn+F5 and volume up."
+    step "power" "Press the POWER button once (the Mac sleeps). Wake it with a key, log in. Then press Fn+F5, volume up (Fn+F3) and MUTE twice."
+    step "wifi" "Wait until the Wi-Fi icon shows it is connected (up to 2 minutes). Then press Enter."
+    run "Wi-Fi details" sh -c "system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,80p'"
+    run "audio inputs (microphone)" sh -c "system_profiler SPAudioDataType 2>/dev/null | sed -n '1,60p'; ioreg -r -c AppleHDACodecGeneric -l -w0 2>/dev/null | grep -E 'PinConfig|NodeID|Mic' | head -20"
+    run "volume/mute keys via BrightnessKeys (count)" sh -c "ioreg -r -c BrightnessKeys -l -w0 2>/dev/null | grep -E 'UX325|Brightness'"
+    run "bluetooth state" sh -c "system_profiler SPBluetoothDataType 2>/dev/null | grep -E 'Address|State|Chipset|Firmware' | head -5"
+    run "sleep/wake history" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12"
+    run "Wi-Fi (helper watchdog)" sh -c "grep -E '\[wifi\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
+    run "panel brightness driver after tests" sh -c "ioreg -p IOService -l -w0 -d 1 2>/dev/null | grep -E '\"WEXTGLEDPBacklight[A-Za-z]*\"'; ioreg -r -c AppleBacklightDisplay -w0 -l 2>/dev/null | grep -oE '\"(bklt|brightness)\"=[^}]*}'"
+    echo ""; printf "  Quick answers (type, then Enter):\n"
+    ask "Fn+F4/F5 changed the brightness? (y/n):" brightness_keys
+    ask "Control Centre DISPLAY slider changed the brightness? (y/n):" cc_slider
+    ask "Volume up/down worked (before sleep)? (y/n):" volume
+    ask "Mute and unmute both worked? (y/n):" mute
+    ask "Two fingers opened the menu? (y/n):" two_finger_menu
+    ask "After the LID test: did the screen come back by itself when you opened the lid? (y/n):" lid_screen
+    ask "After LID sleep: brightness, volume and mute keys worked? (y/n):" keys_after_lid
+    ask "After POWER-button sleep: brightness, volume and mute keys worked? (y/n):" keys_after_power
+    ask "Wi-Fi connected again by itself? (y/n):" wifi
+    sec "user answers"; cat "$ANS" >> "$OUT"; rm -f "$ANS"
+    run "helper log" tail -200 "$USER_HOME/Library/Logs/ZenBookHelper.log"
+    sync; echo ""; echo "[*] Saved to $OUT"
+    if ! sed -n '/==== user answers/,/==== helper log/p' "$OUT" | grep -qE '^[a-z_]+=[^y]'; then
+        echo ""; echo "    EVERYTHING WORKS. Make it permanent (copies this USB setup to the SSD, Windows untouched):"
+        echo "        sudo sh \"$SCRIPT_DIR/sync-efi-to-ssd.sh\" --launcher-full"
+        echo "    Then Shut Down, unplug the USB, power on: the laptop starts like a Mac, without the USB."
+    else
+        echo "    Something still fails - bring the USB back (a black screen after the lid: hold the power"
+        echo "    button to restart, then run this test again - it records what happened)."
+    fi
+    echo "    Or eject the USB (right-click 'Install macOS Sonoma' > Eject) and bring it to the other Mac."
+    exit 0
+fi
 if [ "$MODE" = "led-test" ]; then
     HB="$USER_HOME/Applications/ZenBookHelper.app/Contents/MacOS/ZenBookHelper"
     [ -x "$HB" ] || HB="$SCRIPT_DIR/ZenBookHelper.app/Contents/MacOS/ZenBookHelper"
@@ -182,9 +386,18 @@ gpu_esp() {   # mount point of the OpenCore partition holding config-gpu/config-
     done
     return 1
 }
-gpu_state() { if cmp -s "$1/EFI/OC/config.plist" "$1/EFI/OC/config-gpu.plist"; then echo gpu; elif cmp -s "$1/EFI/OC/config.plist" "$1/EFI/OC/config-stable.plist"; then echo stable; else echo custom; fi; }
+all_esps() {  # every OpenCore partition holding the GPU profiles (USB and SSD), one mount point per line
+    local d mp
+    for d in $(diskutil list 2>/dev/null | awk '{print $NF}' | grep -E '^disk[0-9]+s[0-9]+$'); do
+        [ "$(diskutil info -plist "$d" 2>/dev/null | plutil -extract FilesystemType raw -o - - 2>/dev/null)" = "msdos" ] || continue
+        mp="$(diskutil info -plist "$d" 2>/dev/null | plutil -extract MountPoint raw -o - - 2>/dev/null)"
+        if [ -z "$mp" ]; then as_root diskutil mount -mountOptions nobrowse "$d" >/dev/null 2>&1; mp="$(diskutil info -plist "$d" 2>/dev/null | plutil -extract MountPoint raw -o - - 2>/dev/null)"; fi
+        [ -n "$mp" ] && [ -f "$mp/EFI/OC/config-gpu.plist" ] && [ -f "$mp/EFI/OC/config-stable.plist" ] && echo "$mp"
+    done
+}
+gpu_state() { if [ -f "$1/EFI/OC/config-trial.plist" ] && cmp -s "$1/EFI/OC/config.plist" "$1/EFI/OC/config-trial.plist"; then echo trial; elif cmp -s "$1/EFI/OC/config.plist" "$1/EFI/OC/config-gpu.plist"; then echo gpu; elif cmp -s "$1/EFI/OC/config.plist" "$1/EFI/OC/config-stable.plist"; then echo stable; else echo custom; fi; }
 
-if [ "$MODE" = "gpu-test" ] || [ "$MODE" = "gpu-keep" ] || [ "$MODE" = "gpu-off" ]; then
+if [ "$MODE" = "gpu-test" ] || [ "$MODE" = "gpu-keep" ] || [ "$MODE" = "gpu-off" ] || [ "$MODE" = "gpu-trial" ] || [ "$MODE" = "gpu-trial-keep" ]; then
     echo ""
     as_root -v 2>/dev/null || [ "$(id -u)" -eq 0 ] || { echo "[!] Your admin password is needed."; exit 1; }
     ESP="$(gpu_esp)" || { echo "[!] OpenCore partition with the GPU profiles not found - plug in the ZenBook USB."; exit 1; }
@@ -200,7 +413,19 @@ if [ "$MODE" = "gpu-test" ] || [ "$MODE" = "gpu-keep" ] || [ "$MODE" = "gpu-off"
         echo keep | as_root tee "$GD/gpu-mode" >/dev/null 2>&1
         echo "[OK] GPU profile is now used for EVERY boot ($(gpu_state "$ESP"))."
         echo "     Undo: --gpu-off, or double-click GPU-OFF.command on this USB from any Mac." ;;
-    gpu-test)
+    gpu-trial-keep)
+        [ -f "$OCD/config-trial.plist" ] || { echo "[!] no trial profile on $ESP"; exit 1; }
+        EL="$(mktemp)"; all_esps > "$EL"
+        while IFS= read -r M; do
+            [ -f "$M/EFI/OC/config-trial.plist" ] || continue
+            as_root /bin/cp "$M/EFI/OC/config-gpu.plist" "$M/EFI/OC/config-gpu-before-trial.plist"
+            as_root /bin/cp "$M/EFI/OC/config-trial.plist" "$M/EFI/OC/config-gpu.plist" && as_root /bin/cp "$M/EFI/OC/config-trial.plist" "$M/EFI/OC/config.plist" && sync \
+                && ok "trial setup is now the daily GPU profile on $M"
+        done < "$EL"; rm -f "$EL"
+        echo keep | as_root tee "$GD/gpu-mode" >/dev/null 2>&1
+        echo "[OK] The trial profile is now the daily GPU profile ($(gpu_state "$ESP"))."
+        echo "     Old one saved as config-gpu-before-trial.plist. Undo: --gpu-off" ;;
+    gpu-test|gpu-trial)
         V="$(sw_vers -productVersion)"; B="$(sw_vers -buildVersion)"
         [ "$V" = "14.8.9" ] && ok "macOS $V ($B) - the version WhateverXe 0.8.3 requires for Sonoma" \
                             || warn "macOS $V: WhateverXe 0.8.3 requires Sonoma 14.8.9 exactly - test may fail"
@@ -248,29 +473,69 @@ GUARD_EOF
         as_root chown root:wheel /Library/LaunchDaemons/com.zenbook.gpu-guard.plist
         as_root chmod 644 /Library/LaunchDaemons/com.zenbook.gpu-guard.plist
         plutil -lint /Library/LaunchDaemons/com.zenbook.gpu-guard.plist >/dev/null || { echo "[!] guard plist invalid - aborting"; exit 1; }
-        echo test | as_root tee "$GD/gpu-mode" >/dev/null
-        as_root /bin/cp "$OCD/config-gpu.plist" "$OCD/config.plist" && sync
-        [ "$(gpu_state "$ESP")" = gpu ] || { echo "[!] could not switch the profile"; exit 1; }
-        echo ""
-        echo "=========================================================="
-        echo "  GPU TEST is armed for the NEXT boot only."
-        echo "  - Restart and pick macOS as usual. Verbose text scrolls; the screen may"
-        echo "    flicker or go dark while the GPU driver starts."
-        echo "  - Have a TV/monitor with HDMI? Plug it in BEFORE restarting - the GPU"
-        echo "    desktop may appear there even if the OLED stays dark."
-        echo "  - It WORKS: run   sh \"$SCRIPT_DIR/fix-hardware.sh\" --gpu-report"
-        echo "    and if Metal shows 'Supported' and all is smooth:  --gpu-keep"
-        echo "  - Uses the CUSTOM WhateverXe v2 for this OLED (correct mode timing +"
-        echo "    2 lanes x 2.7 Gbps link, the same link the BIOS uses)."
-        echo "  - SCREEN WORKS: after ~2.5 min a box asks 'Keep?' - click Keep, then run"
-        echo "    --gpu-report, and if all is good --gpu-keep."
-        echo "  - BLACK screen: DO NOTHING. After about 4 minutes the laptop records the"
-        echo "    driver data and RESTARTS BY ITSELF into the normal Mac."
-        echo "    (Only if nothing happens for 6 minutes: hold the power button 10 s,"
-        echo "    turn it on again -> the normal Mac comes back by itself."
-        echo "    Then run --gpu-report and bring the USB to the other Mac."
-        echo "  - Keeps restarting: double-click GPU-OFF.command on this USB from any Mac."
-        echo "=========================================================="
+        if [ "$MODE" = "gpu-trial" ]; then
+            if [ ! -f "$OCD/config-trial.plist" ]; then
+                # Started from the internal SSD copy of OpenCore, which predates the trial files.
+                echo ""
+                echo "[*] This Mac started from the SSD copy of OpenCore ($ESP)."
+                echo "    The USB has newer files (USB map for Bluetooth, trial GPU driver)."
+                printf "    Copy the USB EFI to the SSD now (Windows boot files are kept)? [Y/n] "; read ANS < /dev/tty
+                case "$ANS" in n|N) echo "Cancelled."; exit 1 ;; esac
+                as_root /bin/bash "$SCRIPT_DIR/sync-efi-to-ssd.sh" --launcher-full || { echo "[!] copy to the SSD failed - nothing changed"; exit 1; }
+                ESP="$(gpu_esp)" || { echo "[!] OpenCore partition not found after the copy"; exit 1; }
+                OCD="$ESP/EFI/OC"
+                [ -f "$OCD/config-trial.plist" ] || { echo "[!] still no trial profile on $ESP"; exit 1; }
+                ok "SSD OpenCore updated from the USB ($ESP)"
+            fi
+            cmp -s "$OCD/config.plist" "$OCD/config-trial.plist" && { echo "[!] the trial profile is already active (run --gpu-trial-keep or --gpu-off)"; exit 1; }
+            as_root /bin/cp "$OCD/config.plist" "$OCD/config-prev.plist"
+            echo trial | as_root tee "$GD/gpu-mode" >/dev/null
+            as_root /bin/cp "$OCD/config-trial.plist" "$OCD/config.plist" && sync
+            [ "$(gpu_state "$ESP")" = trial ] || { echo "[!] could not switch the profile"; exit 1; }
+            # The laptop starts from the USB when it is plugged in, else from the SSD: arm both.
+            EL="$(mktemp)"; all_esps > "$EL"
+            while IFS= read -r M; do
+                [ "$M" = "$ESP" ] && continue
+                [ -f "$M/EFI/OC/config-trial.plist" ] || { warn "no trial profile on $M - that copy keeps its normal setup"; continue; }
+                cmp -s "$M/EFI/OC/config.plist" "$M/EFI/OC/config-trial.plist" && continue
+                as_root /bin/cp "$M/EFI/OC/config.plist" "$M/EFI/OC/config-prev.plist" && as_root /bin/cp "$M/EFI/OC/config-trial.plist" "$M/EFI/OC/config.plist" && sync \
+                    && ok "trial also armed on $M"
+            done < "$EL"; rm -f "$EL"
+            echo ""
+            echo "=========================================================="
+            echo "  GPU TRIAL armed for the NEXT boot only (USB and SSD):"
+            echo "    $(/usr/libexec/PlistBuddy -c 'Print :Kernel:Add' "$OCD/config-trial.plist" 2>/dev/null | grep -o 'WhateverXe[^ ]*kext' | head -1)"
+            echo "  - Right at the start of that boot your current setup is put back, so the"
+            echo "    boot after it is your normal Mac again, whatever happens."
+            echo "  - SCREEN WORKS: after ~2.5 min a box asks 'Keep?' - click Keep, test, then"
+            echo "    run --gpu-report. Happy with it?  --gpu-trial-keep  makes it permanent."
+            echo "  - BLACK screen: do nothing. It records data and restarts by itself (~4 min)."
+            echo "=========================================================="
+        else
+            echo test | as_root tee "$GD/gpu-mode" >/dev/null
+            as_root /bin/cp "$OCD/config-gpu.plist" "$OCD/config.plist" && sync
+            [ "$(gpu_state "$ESP")" = gpu ] || { echo "[!] could not switch the profile"; exit 1; }
+            echo ""
+            echo "=========================================================="
+            echo "  GPU TEST is armed for the NEXT boot only."
+            echo "  - Restart and pick macOS as usual. Verbose text scrolls; the screen may"
+            echo "    flicker or go dark while the GPU driver starts."
+            echo "  - Have a TV/monitor with HDMI? Plug it in BEFORE restarting - the GPU"
+            echo "    desktop may appear there even if the OLED stays dark."
+            echo "  - It WORKS: run   sh \"$SCRIPT_DIR/fix-hardware.sh\" --gpu-report"
+            echo "    and if Metal shows 'Supported' and all is smooth:  --gpu-keep"
+            echo "  - Uses the CUSTOM WhateverXe v2 for this OLED (correct mode timing +"
+            echo "    2 lanes x 2.7 Gbps link, the same link the BIOS uses)."
+            echo "  - SCREEN WORKS: after ~2.5 min a box asks 'Keep?' - click Keep, then run"
+            echo "    --gpu-report, and if all is good --gpu-keep."
+            echo "  - BLACK screen: DO NOTHING. After about 4 minutes the laptop records the"
+            echo "    driver data and RESTARTS BY ITSELF into the normal Mac."
+            echo "    (Only if nothing happens for 6 minutes: hold the power button 10 s,"
+            echo "    turn it on again -> the normal Mac comes back by itself."
+            echo "    Then run --gpu-report and bring the USB to the other Mac."
+            echo "  - Keeps restarting: double-click GPU-OFF.command on this USB from any Mac."
+            echo "=========================================================="
+        fi
         printf "  Restart now? [y/N] "; read ANS < /dev/tty
         case "$ANS" in y|Y) as_root shutdown -r now ;; esac ;;
     esac
@@ -300,6 +565,12 @@ if [ "$MODE" = "gpu-report" ]; then
     echo "== AMFIAnchor"; ioreg -r -c AMFIAnchor -l -w0 2>/dev/null | grep -E 'InstallStatus|LoadedAnchors'
     echo "== Graphics package"; pkgutil --pkgs 2>/dev/null | grep -iE 'whateverxe|b00t0x'
     echo "== Display / Metal"; system_profiler SPDisplaysDataType 2>/dev/null
+    echo "== ZenBookHelper status + log (now)"; as_user "$USER_HOME/Applications/ZenBookHelper.app/Contents/MacOS/ZenBookHelper" status 2>/dev/null | head -30
+    tail -200 "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null
+    echo "== Bluetooth"; system_profiler SPBluetoothDataType 2>/dev/null | head -14
+    echo "== USB internal/external (power assertions)"; pmset -g assertions 2>/dev/null | grep -E "usb\.(internal|external)device" | head
+    echo "== sleep/wake history"; pmset -g log 2>/dev/null | grep -E " (Sleep|Wake|DarkWake|Failure) " | tail -15
+    echo "== trackpad settings"; for k in Clicking TrackpadRightClick TrackpadCornerSecondaryClick Dragging; do printf "  %s = %s\n" "$k" "$(as_user defaults read com.apple.AppleMultitouchTrackpad $k 2>/dev/null)"; done
     echo "== Panics (newest 2)"
     for f in $(ls -t /Library/Logs/DiagnosticReports/*anic* 2>/dev/null | head -2); do echo "-- $f"; head -80 "$f"; done
     echo "== Kernel log, last 3 h (GPU related)"
@@ -496,8 +767,8 @@ if [ -d "$SCRIPT_DIR/ZenBookHelper.app" ]; then
     ST="$(perm_state)"
     echo "$ST" | grep -q 'touchpadAccess=1' || warn "NumberPad lights: ZenBookHelper still has no Input Monitoring access"
     echo "$ST" | grep -q 'accessibility=1'  || warn "NumberPad digits / two-finger left click: ZenBookHelper still has no Accessibility access"
-    as_user "$H_BIN" twofinger left >/dev/null 2>&1
-    info "Two-finger tap = LEFT click (needs the Accessibility switch above; undo: zenbook-helper twofinger right)"
+    as_user "$H_BIN" twofinger right >/dev/null 2>&1
+    info "Two-finger tap / click = menu (right click), like a Mac"
     LEDVAR="$(as_user defaults read com.zenbook.helper.settings numpadLEDVariant 2>/dev/null)"
     if [ -z "$LEDVAR" ]; then
         echo ""

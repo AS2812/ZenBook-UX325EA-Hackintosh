@@ -1,5 +1,27 @@
-ZenBook UX325EA Hackintosh - v10.7 (2026-11-20)
+ZenBook UX325EA Hackintosh - v10.8 (2026-11-20)
 =================================================
+
+v10.8 - speakers after the lid, Delete key, boot menu, Wi-Fi capture
+  v10.7 test (keyboard file SSDT-KEYS loaded): the screen and F-keys came back after both lid
+  rounds. Wi-Fi: the driver never started in that one boot (not the lid; in every other test
+  Wi-Fi reconnected 5-9 s after opening the lid). Reported since: no speaker sound after the
+  lid, the key next to the power button does nothing, and after the battery ran empty the USB
+  started Windows (BIOS reset: Secure Boot back on; then the saved "start macOS" was gone).
+  - Speakers: AppleALC layout 11 has no wake setup, so the speaker amplifier stays off after
+    a sleep. Layout 66 (same ALC294 wiring: speaker 0x14, mic 0x1b, headphone 0x21) also turns
+    the amplifiers back on at every wake. alcid=66 + layout-id 66 in all five configs.
+  - Delete key (next to the power button): it is the Mac "forward delete" key, which does
+    nothing in Finder. Helper 8.19 makes it Move to Trash in Finder (like Windows) unless a
+    text field is focused (renaming) or a modifier is held; every press is logged.
+  - Helper 8.19: the F-key bridge from 8.18 is off by default (SSDT-KEYS already does the
+    keys); switch on with: defaults write com.zenbook.helper fkeyBridge -bool YES
+  - Boot menu: this USB's config.plist shows the OpenCore menu and waits (ShowPicker on) until
+    macOS is the Startup Disk again (System Settings > General > Startup Disk > macOS).
+  - Test v10.8 plays a sound before sleep and after each lid round, asks if you heard it,
+    tests the Delete key on a new folder and records whether the Wi-Fi driver attached.
+  Undo: the previous configs, script and README are in
+  UX325EA-RESCUE/BACKUPS/pre-v108-20261120-232239 (copy them back to EFI/OC).
+
 
 Internal keyboard and lid wake
   Boot macOS through this USB's OpenCore. F1 mutes, F2/F3 change volume,

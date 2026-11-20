@@ -22,13 +22,19 @@ template <typename T> static T FunctionCast(T, uintptr_t a) { return reinterpret
 static bool forceVesa, zeroArg;
 static bool checkKernelArgument(const char *n) { return (forceVesa && !strcmp(n, "-wex-tgl-edp-bl-vesa")) || (zeroArg && !strcmp(n, "-wex-tgl-edp-bl-zero")); }
 #define SYSLOG(...) do {} while (0)
+typedef unsigned int UInt32; typedef unsigned long vm_size_t; struct IOService; struct IONotifier { int dummy; };
+enum { kIOMessageSystemWillPowerOff = 0xe0000250, kIOMessageSystemWillRestart = 0xe0000310, kIOMessageSystemWillSleep = 0xe0000280 };
+typedef IOReturn (*IOServiceInterestHandler)(void *, void *, UInt32, IOService *, void *, vm_size_t);
+static IOServiceInterestHandler registeredHandler; static IONotifier theNotifier;
+static IONotifier *registerPrioritySleepWakeInterest(IOServiceInterestHandler h, void *, void * = nullptr) { registeredHandler = h; return &theNotifier; }
 struct Panel { bool valid {}; uint32_t ddi {}; }; struct Ports { Panel panel; };
 static uint8_t dpcd[0x10000]; static std::vector<std::pair<uint32_t,std::vector<uint8_t>>> writes;
 struct XE {
   Ports firmwarePorts; bool tglEDPLaneClamp {}, tglEDPTimingFix {}, tglEDPSinkExtCaps {}, tglEDPBacklight {}; uint8_t tglEDPSinkRate[2] {}; void *tglEDPSinkPort {};
   uint8_t tglEDPBLState {}, tglEDPBLCaps[4] {}, tglEDPBLIface {}; uint32_t tglEDPBLMaximum {}, tglEDPBLMaxNits {};
-  uint32_t tglEDPBLWantLevel {UINT32_MAX}; bool tglEDPBLPending {};
+  uint32_t tglEDPBLWantLevel {UINT32_MAX}; bool tglEDPBLPending {}; IONotifier *tglEDPBLShutdownNotifier {};
   static void tglEDPBLReapply(XE *s, void *port);
+  static IOReturn tglEDPBLShutdown(void *, void *, UInt32, IOService *, void *, vm_size_t);
   uintptr_t orgTGLSetupDisplayTiming {}, orgTGLOptimalLaneCount {}, orgTGLHwSetBacklight {}, orgTGLRegisterRead {};
   static uint32_t wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bpp);
   static void wrapTGLSetupDisplayTiming(void *fb, const void *src, void *out);
@@ -100,5 +106,13 @@ int main() {
   // I9: a normal write after a skipped one also clears the mark (no second re-send needed)
   ppStatus = 0; XE::wrapTGLHwSetBacklight(controller, 65535); assert(driver.tglEDPBLPending);
   ppStatus = 0x80000008; XE::wrapTGLHwSetBacklight(controller, 49151); assert(!driver.tglEDPBLPending && (dpcd[0x354] | dpcd[0x355] << 8) == 461);
-  printf("ALL 9 INTEL/VESA BACKLIGHT CHECKS PASSED\n");
+  // I10 (v4.4): the Intel probe registers the shutdown hook once; power off / restart -> 0 nits, sleep -> untouched
+  assert(driver.tglEDPBLShutdownNotifier == &theNotifier && registeredHandler == &XE::tglEDPBLShutdown);
+  XE::wrapTGLHwSetBacklight(controller, 49151); assert((dpcd[0x354] | dpcd[0x355] << 8) == 461);
+  registeredHandler(nullptr, nullptr, kIOMessageSystemWillSleep, nullptr, nullptr, 0); assert((dpcd[0x354] | dpcd[0x355] << 8) == 461 && dpcd[0x600] != 0x02);
+  dpcd[0x600] = 0x01;
+  registeredHandler(nullptr, nullptr, kIOMessageSystemWillPowerOff, nullptr, nullptr, 0); assert(dpcd[0x354] == 0 && dpcd[0x355] == 0 && dpcd[0x600] == 0x02);
+  XE::wrapTGLHwSetBacklight(controller, 49151); registeredHandler(nullptr, nullptr, kIOMessageSystemWillRestart, nullptr, nullptr, 0);
+  assert(dpcd[0x354] == 0 && dpcd[0x355] == 0);
+  printf("ALL 10 INTEL/VESA BACKLIGHT CHECKS PASSED\n");
 }

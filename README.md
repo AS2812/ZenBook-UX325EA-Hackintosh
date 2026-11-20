@@ -27,18 +27,18 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 | Component | Model | Driver / method | Status |
 |---|---|---|---|
 | CPU | Intel Core i7‑1165G7 (Tiger Lake) | SSDT‑PLUG, CpuTscSync, `revcpu`/RestrictEvents | ✅ |
-| GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.3**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit |
+| GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.6**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit; clean loading screen at boot and login (v4.6) |
 | Display | Samsung OLED eDP 1.4 (ATNA33XC11), 2 lanes | patched link setup (2 × 2.7 Gbps) | ✅ |
 | Brightness | OLED, Intel DPCD nits interface | patch `-wex-tgl-edp-bl` + **SSDT‑PNLF `_UID` 19** | ✅ real panel brightness, Control Centre slider, Fn+F4/F5, bezel, 0 = black |
-| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ |
+| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ reconnects 5–9 s after a lid wake; once the driver did not start at boot (v10.8 test records why) |
 | Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
-| Audio | Realtek ALC294 | AppleALC 1.9.8, `alcid=11`; helper enforces mute | ✅ speakers, headphones; mute/unmute with bezel |
+| Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake: fix in v10.8, test pending |
 | Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
-| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑WAKE** | Brightness, volume and mute. SSDT-KEYS maps six plain function keys reported after lid wake. Physical retest pending. |
+| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑KEYS**, **SSDT‑WAKE** | ✅ brightness, volume, mute, keyboard light, also after lid wake (SSDT‑KEYS maps the six keys the EC reports as plain F‑keys after a wake). Delete key (next to power) = Move to Trash in Finder (helper 8.19, test pending) |
 | Keyboard backlight | EC | **SSDT‑KBL** (Fn+F7 cycles 0→3) | ✅ |
 | Trackpad + NumberPad | ELAN I2C HID (04F3:3134) | VoodooI2C/HID + **ZenBookHelper** | ✅ tap, two‑finger menu, gestures, NumberPad + calculator |
-| Sleep / wake | S3 | power button → sleep (helper), lid, password after wake | ✅ power button; lid: fix in v10.0 (driver v4.3 + helper 8.15) |
-| Shut Down | — | `SSDT-WAKE` (XHCI PME off) | ✅ apps close, then off |
+| Sleep / wake | S3 | power button → sleep (helper), lid (EC sensor poll), password after wake | ✅ power button and lid: screen and keys come back (tested 20 s and 1 min) |
+| Shut Down | — | `SSDT-WAKE` (XHCI PME off), panel off before power-off (v4.4) | ✅ apps close, black screen, then off |
 | Webcam | USB (HS06, internal) | USB map | ✅ |
 | SD card reader | Realtek PCIe | RealtekCardReader(Friend) | driver installed |
 | NVMe | SK hynix PC711 | PC711Probe | ✅ |
@@ -58,13 +58,14 @@ the same SSD is supported (the sync script never touches `\EFI\Microsoft`).
 ## Repository layout
 
 ```
-EFI/OC/config.plist          daily profile: GPU acceleration + every fix (= config-gpu.plist)
+EFI/OC/config.plist          daily profile: GPU acceleration + every fix (= config-gpu.plist, but
+                             currently shows the OpenCore menu: ShowPicker true, see Troubleshooting)
 EFI/OC/config-gpu.plist      the same (used by fix-hardware.sh --gpu-keep / the GPU guard)
 EFI/OC/config-stable.plist   safe profile: same fixes, no acceleration (-wexoff), verbose boot
 EFI/OC/ACPI/                 SSDT-KBL (Fn keys, keyboard light), SSDT-KEYS (internal action row), SSDT-PNLF (_UID 19),
                              SSDT-WAKE (volume/mute route, ATK queue, wake/shutdown hooks), ...
 EFI/OC/Kexts/WhateverXe-UX325-v4.kext   patched WhateverXe (src/WhateverXe-UX325)
-EFI/OC/Kexts/BrightnessKeys-UX325.kext  BrightnessKeys 1.0.3 + volume/mute codes (src/BrightnessKeys-UX325)
+EFI/OC/Kexts/BrightnessKeys-UX325.kext  BrightnessKeys 1.0.3 + volume/mute codes + EC event poll (src/BrightnessKeys-UX325)
 EFI/OC/Kexts/USBMap-UX325EA.kext        codeless USB map: Bluetooth (HS10) + webcam (HS06) internal
 usb-kit/                     tools for the USB's data partition
   fix-hardware.sh            apply fixes, --test (guided test + report), --audit, --diagnose, --gpu-*
@@ -113,6 +114,15 @@ another Mac.
 
 > Always **Eject** the USB before unplugging it. An unclean unplug can damage the
 > data partition's file system.
+
+### Troubleshooting: the USB/SSD entry starts Windows
+
+If the battery runs completely flat, the ASUS BIOS loads its defaults: **Secure Boot is on
+again** and the firmware silently skips OpenCore and starts Windows. Press F2, set Secure Boot
+Control = Disabled, Fast Boot = Disabled (and fix the date/time), F10. If OpenCore then still
+starts Windows by itself, the saved startup disk was lost: with `ShowPicker` = true OpenCore
+shows its menu and waits; choose macOS, then System Settings > General > Startup Disk > macOS
+> Restart. Afterwards `ShowPicker` can go back to false.
 
 ---
 

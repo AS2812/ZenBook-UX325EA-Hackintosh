@@ -1,0 +1,164 @@
+--- a/BrightnessKeys/BrightnessKeys.cpp
++++ b/BrightnessKeys/BrightnessKeys.cpp
+@@ -186,12 +186,92 @@
+         return false;
+     }
+     
++    // UX325EA EC event poll (see BrightnessKeys.hpp)
++    IOACPIPlatformDevice *cands[] = {_panel, _panelFallback, _panelDiscrete};
++    for (auto d : cands)
++        if (d && !_ecPollDev && d->validateObject("ZECP") == kIOReturnSuccess)
++            _ecPollDev = d;
++    if (_ecPollDev) {
++        _ecPoll = IOTimerEventSource::timerEventSource(this, OSMemberFunctionCast(IOTimerEventSource::Action, this, &BrightnessKeys::ecPollTick));
++        if (_ecPoll && workLoop->addEventSource(_ecPoll) == kIOReturnSuccess) {
++            // v2: no polling at boot - only a baseline ZDIA snapshot; the poll runs after wakes
++            _ecDiagIn = 1;
++            _ecPoll->setTimeoutMS(10000);
++            setProperty("UX325ECPoll", _ecPollDev->getName());
++            _sleepWakeNotifier = ::registerPrioritySleepWakeInterest(&BrightnessKeys::sleepWakeHandler, this);
++            SYSLOG("brkeys", "UX325 EC event poll ready on %s (runs from each wake until the next sleep)", _ecPollDev->getName());
++        } else {
++            OSSafeReleaseNULL(_ecPoll);
++        }
++    }
++
+     registerService();
+ 
+     return true;
+ }
+ 
++IOReturn BrightnessKeys::sleepWakeHandler(void *target, void *refCon, UInt32 messageType, IOService *provider, void *messageArgument, vm_size_t argSize) {
++    auto self = OSDynamicCast(BrightnessKeys, reinterpret_cast<OSMetaClassBase *>(target));
++    if (self && self->_ecPoll) {
++        if (messageType == kIOMessageSystemWillSleep) {
++            self->_ecPollActive = false;                    // the EC is fine again after the next boot/wake check
++        } else if (messageType == kIOMessageSystemHasPoweredOn) {
++            self->_ecPollActive = true;                     // lid sensor + EC events until the next sleep
++            self->_ecTicksSinceWake = 0;
++            self->_ecDiagIn = 7;                            // ZDIA snapshot ~2 s after the wake
++            self->_ecPoll->setTimeoutMS(300);
++        }
++    }
++    return kIOReturnSuccess;
++}
++
++void BrightnessKeys::ecDiag(const char *why) {
++    OSObject *res = nullptr;
++    if (_ecPollDev && _ecPollDev->evaluateObject("ZDIA", &res) == kIOReturnSuccess && res) {
++        setProperty("UX325ECDiag", res);
++        auto a = OSDynamicCast(OSArray, res);
++        auto n = [a](unsigned i) -> unsigned long long { auto o = a ? OSDynamicCast(OSNumber, a->getObject(i)) : nullptr; return o ? o->unsigned64BitValue() : ~0ULL; };
++        SYSLOG("brkeys", "UX325 EC state (%s): ECNO %llx ECUP %llx status %llx OSTP %llx OSDT %llx lid %llx ATKP %llx wakeECNT %llu drained %llu last %llx polled %llu",
++               why, n(0), n(1), n(2), n(3), n(4), n(5), n(6), n(7), n(8), n(9), n(10));
++        res->release();
++    }
++}
++
++void BrightnessKeys::ecPollTick(IOTimerEventSource *sender) {
++    if (_ecDiagIn && --_ecDiagIn == 0)
++        ecDiag(_ecPollActive ? "after wake" : "boot");
++    if (!_ecPollActive)
++        return;                                             // idle until the next wake
++    _ecTicksSinceWake++;
++    UInt32 delivered = 0;
++    if (_ecPollDev && _ecPollDev->evaluateInteger("ZECP", &delivered) == kIOReturnSuccess) {
++        _ecPollCount++;
++        if (delivered) {
++            _ecPollEvents += delivered;
++            setProperty("UX325ECPollEvents", _ecPollEvents, 32);
++            SYSLOG("brkeys", "UX325 EC poll: macOS left %u event(s) waiting - delivered (total %u)", delivered, _ecPollEvents);
++        }
++    }
++    if (_ecTicksSinceWake == 300 || _ecTicksSinceWake == 2000)  // ~90 s and ~10 min after the wake
++        ecDiag(_ecTicksSinceWake == 300 ? "90 s after wake" : "10 min after wake");
++    if ((_ecPollCount & 63) == 0)
++        setProperty("UX325ECPolls", _ecPollCount, 32);
++    if (_ecPoll)
++        _ecPoll->setTimeoutMS(300);
++}
++
+ void BrightnessKeys::stop(IOService *provider) {
++    if (_sleepWakeNotifier) {
++        _sleepWakeNotifier->remove();
++        _sleepWakeNotifier = nullptr;
++    }
++    if (_ecPoll) {
++        _ecPoll->cancelTimeout();
++        if (workLoop)
++            workLoop->removeEventSource(_ecPoll);
++        OSSafeReleaseNULL(_ecPoll);
++    }
++
+     //
+     // Release ACPI provider for panel and PS2K ACPI device
+     //
+@@ -282,6 +362,35 @@
+                     DBGLOG("brkeys", "%s ACPI brightness down", provider->getName());
+                     break;
+                     
++                // UX325EA: volume up / down / mute sent by SSDT-WAKE (ASUS ATK codes 0x30/0x31/0x32)
++                // instead of the ATK queue, which stops delivering them to AsusSMC after sleep.
++                // Same delivery as brightness: PS/2 keyboard ADB 0x48/0x49/0x4a = NX sound up/down/mute.
++                case 0x90:
++                case 0x91:
++                case 0x92: {
++                    const unsigned adb = arg == 0x90 ? 0x48 : arg == 0x91 ? 0x49 : 0x4a;
++                    info.adbKeyCode = adb;
++                    info.eatKey = false;
++                    info.goingDown = true;
++                    clock_get_uptime(&info.time);
++                    self->dispatchMessage(kPS2M_notifyKeyTime, &info.time);
++                    self->dispatchMessage(kPS2K_notifyKeystroke, &info);
++                    if (info.eatKey) {
++                        info.eatKey = false;
++                        info.goingDown = false;
++                        clock_get_uptime(&info.time);
++                        self->dispatchMessage(kPS2K_notifyKeystroke, &info);
++                    } else {
++                        clock_get_uptime(&info.time);
++                        self->dispatchKeyboardEventX(adb, true, info.time);
++                        clock_get_uptime(&info.time);
++                        self->dispatchKeyboardEventX(adb, false, info.time);
++                    }
++                    self->setProperty("UX325VolumeKeys", ++self->_ux325Keys, 32);
++                    DBGLOG("brkeys", "%s ACPI volume/mute key 0x%02x -> adb 0x%02x", provider->getName(), arg, adb);
++                    return kIOReturnSuccess;
++                }
++
+                 case kIOACPIMessageBrightnessCycle:
+                 case kIOACPIMessageBrightnessZero:
+                 case kIOACPIMessageBrightnessOff:
+--- a/BrightnessKeys/BrightnessKeys.hpp
++++ b/BrightnessKeys/BrightnessKeys.hpp
+@@ -7,6 +7,9 @@
+ #include <IOKit/hidsystem/IOHIKeyboard.h>
+ #include <IOKit/acpi/IOACPIPlatformDevice.h>
+ #include <IOKit/IOCommandGate.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/pwr_mgt/RootDomain.h>
++#include <IOKit/IOMessage.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ 
+ 
+@@ -36,6 +39,20 @@
+     IOACPIPlatformDevice *      _panelFallback {nullptr};
+     IOACPIPlatformDevice *      _panelDiscrete {nullptr};
+     bool                        _panelNotified {false};
++    uint32_t                    _ux325Keys {0};
++    // UX325EA: after a lid wake macOS stops taking EC events (Fn keys, lid, battery). Poll the
++    // firmware every 300 ms; SSDT-WAKE (DD1F.ZECP) delivers events macOS left waiting.
++    IOTimerEventSource *        _ecPoll {nullptr};
++    IOACPIPlatformDevice *      _ecPollDev {nullptr};
++    uint32_t                    _ecPollEvents {0};
++    bool                        _ecPollActive {false};      // from a wake until the next sleep
++    uint32_t                    _ecTicksSinceWake {0};
++    uint32_t                    _ecPollCount {0};
++    uint32_t                    _ecDiagIn {0};              // ticks until the next ZDIA snapshot
++    IONotifier *                _sleepWakeNotifier {nullptr};
++    void ecPollTick(IOTimerEventSource *sender);
++    void ecDiag(const char *why);
++    static IOReturn sleepWakeHandler(void *target, void *refCon, UInt32 messageType, IOService *provider, void *messageArgument, vm_size_t argSize);
+     IONotifier *                _panelNotifiers {nullptr};
+     IONotifier *                _panelNotifiersFallback {nullptr};
+     IONotifier *                _panelNotifiersDiscrete {nullptr};

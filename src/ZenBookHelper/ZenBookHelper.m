@@ -32,7 +32,7 @@
 #include <math.h>
 #include <objc/message.h>
 
-#define ZB_VERSION "8.15"
+#define ZB_VERSION "8.19"
 static NSString *const kSuite   = @"com.zenbook.helper.settings";
 static NSString *const kCmdNote = @"com.zenbook.helper.cmd";
 static const float kMinLevel  = 0.10f;   // never go fully black on the OLED
@@ -88,6 +88,30 @@ static void CrashLoopGuard(NSString *key) {
 // =============================================================================
 #pragma mark - Pure logic (unit-tested by `selftest`)
 // =============================================================================
+// v8.18: plain F-key (macOS keycode) -> the EC query its Fn function runs on the UX325EA
+// (F1 mute _Q1A, F2/F3 volume _Q1B/_Q1C, F4/F5 brightness _Q15/_Q16, F7 keyboard light _Q66)
+static int ZFKeyQuery(int64_t kc) {
+    switch (kc) {
+        case 0x7A: return 0x1A; case 0x78: return 0x1B; case 0x63: return 0x1C;
+        case 0x76: return 0x15; case 0x60: return 0x16; case 0x62: return 0x66;
+        default:   return 0;
+    }
+}
+// Bridge only after a wake, only while no real Fn hotkey arrived since that wake, never with
+// Cmd/Ctrl/Opt held (shortcuts like Cmd+F5 stay normal), and only if not switched off.
+static BOOL ZFKeyBridgeWanted(double wakeAt, BOOL nativeSinceWake, uint64_t flags, BOOL enabled) {
+    const uint64_t mods = 0x100000 | 0x40000 | 0x80000;   // Cmd, Ctrl, Opt
+    return enabled && wakeAt > 0 && !nativeSinceWake && !(flags & mods);
+}
+// v8.19: the Delete key next to the power button is the Mac "forward delete" key (0x75). In
+// Finder that does nothing, while Windows sends the selection to the Recycle Bin. Give it the
+// Windows meaning in Finder only, never while a text field has focus (renaming a file keeps the
+// normal forward delete) and never with a modifier held (Fn and keypad flags are ignored).
+static BOOL ZDeleteToTrash(int64_t kc, uint64_t flags, BOOL finderFront, BOOL textFocus) {
+    const uint64_t mods = 0x100000 | 0x40000 | 0x80000 | 0x20000;   // Cmd, Ctrl, Opt, Shift
+    return kc == 0x75 && finderFront && !textFocus && !(flags & mods);
+}
+
 typedef struct { int maxX, maxY; } ZAxisMax;
 
 // Minimal HID report-descriptor walk: logical maximum of Generic Desktop X (0x30) / Y (0x31)
@@ -473,6 +497,8 @@ static void ShowNotice(NSString *symbol, NSString *text) {
     NSWindow *_hud; ZHUDView *_hudView; NSTimer *_hudTimer;
     CFMachPortRef _tap; CFRunLoopSourceRef _tapSrc;
     dispatch_source_t _sigSrc[3];
+    CFMachPortRef _fkTap; BOOL _fnNative, _fnBridging; double _bridgeAt; int _bridgeLogs, _deleteLogs; BOOL _fkSwallowed[128];
+    dispatch_queue_t _bridgeQ;
 }
 
 static OSStatus HotKeyCB(EventHandlerCallRef next, EventRef ev, void *ud) {
@@ -503,6 +529,7 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
             int code = (int)((d1 & 0xFFFF0000) >> 16);
             BOOL down = (((d1 & 0xFF00) >> 8) == 0x0A), rep = (d1 & 0x1) != 0;
             if (down) [b noteKey:code repeat:rep];
+            if (down && (code == 0 || code == 1 || code == 7)) [b nativeHotkey];
             if (down && !rep && code == 7) [b muteKey];           // NX_KEYTYPE_MUTE (held key: once)
             if (down && code == 2) [b step:+1 source:SrcNX];      // NX_KEYTYPE_BRIGHTNESS_UP
             if (down && code == 3) [b step:-1 source:SrcNX];      // NX_KEYTYPE_BRIGHTNESS_DOWN
@@ -512,8 +539,17 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
         if (CGEventGetIntegerValueField(ev, kCGKeyboardEventAutorepeat)) return ev;
         if (kc == 0x71) [b step:+1 source:SrcFKey];
         if (kc == 0x6B) [b step:-1 source:SrcFKey];
+        if (kc == 0x71 || kc == 0x6B) [b nativeHotkey];
+        [b noteFKey:(int)kc];
     }
     return ev;
+}
+
+static CGEventRef FKeyTapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, void *ud) {
+    ZBrightness *b = (__bridge ZBrightness *)ud;
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) { [b reenableFKeyTap]; return ev; }
+    if (type != kCGEventKeyDown && type != kCGEventKeyUp) return ev;
+    return [b fkeyEvent:ev down:(type == kCGEventKeyDown)] ? NULL : ev;
 }
 
 - (instancetype)init {
@@ -542,8 +578,9 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
 
     [self refreshDriver];
     [self installTap];
+    [self installFKeyTap];
     _mute = [ZMute new]; [_mute start];
-    [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) { if (!self->_tap) [self installTap]; [self refreshDriver]; }];
+    [NSTimer scheduledTimerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *t) { if (!self->_tap) [self installTap]; if (!self->_fkTap) [self installFKeyTap]; [self refreshDriver]; }];
     [NSTimer scheduledTimerWithTimeInterval:0.25 target:self selector:@selector(pollNative) userInfo:nil repeats:YES];
     [NSTimer scheduledTimerWithTimeInterval:4.0 target:self selector:@selector(reassert) userInfo:nil repeats:YES];
 
@@ -632,6 +669,105 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
     [self saveStatus];
 }
 - (void)reenableTap { if (_tap) CGEventTapEnable(_tap, true); }
+
+// v8.18 F-key bridge: after a lid wake the EC sends Fn+F1..F7 as plain F-keys and no hotkey
+// events at all. While that lasts, the plain key is swallowed and its EC query is run through
+// BrightnessKeys-UX325 -> SSDT-WAKE DD1F.ZKEY (the firmware's own handler: same bezels/steps).
+- (void)installFKeyTap {
+    if (_fkTap) return;
+    CGEventMask m = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
+    _fkTap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, m, FKeyTapCB, (__bridge void *)self);
+    if (!_fkTap) return;                                    // no Accessibility yet: retried by the 5 s timer
+    CFRunLoopSourceRef src = CFMachPortCreateRunLoopSource(NULL, _fkTap, 0);
+    CFRunLoopAddSource(CFRunLoopGetMain(), src, kCFRunLoopCommonModes); CFRelease(src);
+    CGEventTapEnable(_fkTap, true);
+    if (!_bridgeQ) _bridgeQ = dispatch_queue_create("zenbook.fkeybridge", DISPATCH_QUEUE_SERIAL);
+    ZLog(@"key tap ready (Delete key in Finder = Move to Trash; F-key bridge %@)", [self bridgeEnabled] ? @"on" : @"off");
+}
+- (void)reenableFKeyTap { if (_fkTap) CGEventTapEnable(_fkTap, true); }
+// v8.19: off unless switched on (defaults write com.zenbook.helper fkeyBridge -bool YES). The
+// SSDT-KEYS PS/2 map already turns F1-F5/F7 into their functions, also after a lid wake.
+- (BOOL)bridgeEnabled { return [Defs() boolForKey:@"fkeyBridge"]; }
+// Is a text field focused? Unknown (no Accessibility, timeout) counts as yes: never trash then.
+static BOOL ZTextFocused(void) {
+    AXUIElementRef sys = AXUIElementCreateSystemWide();
+    if (!sys) return YES;
+    AXUIElementSetMessagingTimeout(sys, 0.25f);
+    CFTypeRef el = NULL, role = NULL; BOOL text = YES;
+    AXError fe = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute, &el);
+    if (fe == kAXErrorSuccess && el) {
+        AXUIElementSetMessagingTimeout((AXUIElementRef)el, 0.25f);
+        if (AXUIElementCopyAttributeValue((AXUIElementRef)el, kAXRoleAttribute, &role) == kAXErrorSuccess && role) {
+            NSString *r = (__bridge NSString *)role;
+            text = [r isEqualToString:(__bridge NSString *)kAXTextFieldRole] || [r isEqualToString:(__bridge NSString *)kAXTextAreaRole] ||
+                   [r isEqualToString:(__bridge NSString *)kAXComboBoxRole] || [r isEqualToString:@"AXSearchField"];
+            CFRelease(role);
+        }
+        CFRelease(el);
+    } else if (fe == kAXErrorNoValue) text = NO;            // nothing focused = the file list itself
+    CFRelease(sys);
+    return text;
+}
+- (BOOL)deleteKeyEvent:(CGEventRef)ev down:(BOOL)down {
+    if (!down) { BOOL s = _fkSwallowed[0x75]; _fkSwallowed[0x75] = NO; return s; }
+    NSRunningApplication *front = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    BOOL finder = [front.bundleIdentifier isEqualToString:@"com.apple.finder"];
+    BOOL rep = CGEventGetIntegerValueField(ev, kCGKeyboardEventAutorepeat) != 0;
+    BOOL text = finder ? ZTextFocused() : YES;
+    BOOL trash = ZDeleteToTrash(0x75, CGEventGetFlags(ev), finder, text);
+    if (!rep && _deleteLogs < 8) { _deleteLogs++; ZLog(@"Delete key (next to power) pressed in %@ -> %@", front.localizedName ?: @"?",
+                                                        trash ? @"Move to Trash" : @"forward delete"); }
+    _fkSwallowed[0x75] = trash;
+    if (!trash || rep) return trash;                        // held key: one Move to Trash only
+    CGEventRef d = CGEventCreateKeyboardEvent(NULL, 0x33, true), u = CGEventCreateKeyboardEvent(NULL, 0x33, false);
+    if (d && u) {
+        CGEventSetFlags(d, kCGEventFlagMaskCommand); CGEventSetFlags(u, kCGEventFlagMaskCommand);
+        CGEventPost(kCGSessionEventTap, d); CGEventPost(kCGSessionEventTap, u);
+    }
+    if (d) CFRelease(d);
+    if (u) CFRelease(u);
+    return YES;
+}
+- (void)nativeHotkey {
+    if (CFAbsoluteTimeGetCurrent() - _bridgeAt < 1.0) return;   // our own bridged key coming back
+    if (!_fnNative && _wakeAt > 0) ZLog(@"real Fn hotkey received after the wake - F-key bridge %@", _fnBridging ? @"off again" : @"not needed");
+    _fnNative = YES; _fnBridging = NO;
+}
+- (BOOL)fkeyEvent:(CGEventRef)ev down:(BOOL)down {
+    int64_t kc = CGEventGetIntegerValueField(ev, kCGKeyboardEventKeycode);
+    if (kc == 0x75) return [self deleteKeyEvent:ev down:down];
+    int q = ZFKeyQuery(kc);
+    if (!q || kc < 0 || kc >= 128) return NO;
+    if (!down) { BOOL s = _fkSwallowed[kc]; _fkSwallowed[kc] = NO; return s; }   // up matches its down
+    if (!ZFKeyBridgeWanted(_wakeAt, _fnNative, CGEventGetFlags(ev), [self bridgeEnabled])) { _fkSwallowed[kc] = NO; return NO; }
+    _fkSwallowed[kc] = YES;
+    BOOL rep = CGEventGetIntegerValueField(ev, kCGKeyboardEventAutorepeat) != 0;
+    if (rep && (q == 0x1A || q == 0x66)) return YES;         // held mute / keyboard light: once
+    if (!_fnBridging) { _fnBridging = YES; ZLog(@"after wake: Fn hotkeys dead (plain F-keys) - F-key bridge ON"); }
+    _bridgeAt = CFAbsoluteTimeGetCurrent();
+    __weak ZBrightness *ws = self; int logIt = _bridgeLogs < 6 ? ++_bridgeLogs : 0;
+    dispatch_async(_bridgeQ, ^{
+        io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("BrightnessKeys"));
+        kern_return_t r = svc ? IORegistryEntrySetCFProperty(svc, CFSTR("UX325Key"), (__bridge CFTypeRef)@(q)) : KERN_FAILURE;
+        if (svc) IOObjectRelease(svc);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ZBrightness *ss = ws; if (!ss) return;
+            ss->_bridgeAt = CFAbsoluteTimeGetCurrent();
+            if (logIt) ZLog(@"F-key bridge: keycode 0x%llX -> EC query %02X: %s (0x%X)", (long long)kc, q, r == KERN_SUCCESS ? "ran" : "FAILED", r);
+        });
+    });
+    return YES;
+}
+// v8.17: plain F1..F12 after a wake = the EC forgot the ASUS Fn-lock (Fn+F5 arrives as F5)
+- (void)noteFKey:(int)kc {
+    static const int codes[12] = { 0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, 0x67, 0x6F };
+    for (int i = 0; i < 12; i++) if (codes[i] == kc) {
+        if (CFAbsoluteTimeGetCurrent() - _wakeAt > 120 || _wakeKeys >= 12) return;
+        _wakeKeys++;
+        ZLog(@"after wake: plain F%d key received (an Fn function key arrived as a normal key)", i + 1);
+        return;
+    }
+}
 // v8.13: evidence for "keys dead after sleep": log the first media keys after each wake
 - (void)noteKey:(int)code repeat:(BOOL)rep {
     if (rep || CFAbsoluteTimeGetCurrent() - _wakeAt > 120 || _wakeKeys >= 12) return;
@@ -861,7 +997,8 @@ static CGEventRef TapCB(CGEventTapProxy proxy, CGEventType type, CGEventRef ev, 
 - (float)nativeValue { float v = -1; if (DSGet && DSGet(CGMainDisplayID(), &v) != 0) v = -1; return v; }
 - (void)wakeOrSwitch:(NSNotification *)n {
     ZLog(@"%@ - re-applying", n.name);
-    if (![n.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification]) { _wakeAt = CFAbsoluteTimeGetCurrent(); _wakeKeys = 0; }
+    if (![n.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification]) { _wakeAt = CFAbsoluteTimeGetCurrent(); _wakeKeys = 0; _fnNative = NO; _fnBridging = NO; }
+    if (_fkTap && !CGEventTapIsEnabled(_fkTap)) CGEventTapEnable(_fkTap, true);
     if (_tap && !CGEventTapIsEnabled(_tap)) { ZLog(@"key event tap was disabled during sleep - re-enabled"); CGEventTapEnable(_tap, true); }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self nativeRescue]; });
     if (![n.name isEqualToString:NSWorkspaceSessionDidBecomeActiveNotification])
@@ -1295,7 +1432,7 @@ static NSString *ZLinkDesc(CWInterface *i) {
 
 @interface ZWiFi : NSObject
 @end
-@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; }
+@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; int _powerState; BOOL _firstCheck; double _noIfLog; }
 - (void)start {
     ZLog(@"Wi-Fi watchdog v%s start", ZB_VERSION);
     CrashLoopGuard(@"wifiStarts");
@@ -1309,8 +1446,26 @@ static NSString *ZLinkDesc(CWInterface *i) {
 }
 - (void)check {
     CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
-    if (!i) return;
     double now = CFAbsoluteTimeGetCurrent();
+    if (!i) {                                                // v8.16: make a dead Wi-Fi visible
+        if (now - _noIfLog > 60) { _noIfLog = now; ZLog(@"no Wi-Fi interface - the Wi-Fi driver (AirportItlwm) did not start"); }
+        [Defs() setObject:@"no Wi-Fi interface" forKey:@"wifiStatus"];
+        return;
+    }
+    // v8.16 (v10.3 test: Wi-Fi dead for a whole session, nothing logged): log power changes and
+    // switch Wi-Fi on once if it is off when the helper starts (login) - this laptop should be online.
+    int power = i.powerOn ? 1 : 0;
+    if (!_firstCheck) {
+        _firstCheck = YES; _powerState = power;
+        ZLog(@"Wi-Fi at start: %@", ZLinkDesc(i));
+        if (!power) {
+            NSError *e = nil; BOOL ok = [i setPower:YES error:&e];
+            ZLog(@"Wi-Fi was switched off at login - switched on %@", ok ? @"(ok)" : e.localizedDescription ?: @"(failed)");
+            power = i.powerOn ? 1 : 0; _powerState = power;
+        }
+    } else if (power != _powerState) {
+        _powerState = power; ZLog(@"Wi-Fi switched %@", power ? @"ON" : @"OFF");
+    }
     NSString *ip = ZIPv4(i.interfaceName ?: @"en0");
     NSString *desc = ZLinkDesc(i);
     if (ip) {
@@ -1390,6 +1545,20 @@ static int SelfTest(void) {
     { double last = -100; BOOL a = ZPressAccept(&last, 10.0), b = YES; for (int i = 1; i <= 25; i++) b = b && !ZPressAccept(&last, 10.0 + i * 0.083);
       BOOL c = ZPressAccept(&last, 10.0 + 25 * 0.083 + 0.5);
       CHECK(a && b && c, "held mute key (25 repeats, 83 ms) = 1 toggle; next press accepted"); }
+    CHECK(ZFKeyQuery(0x7A) == 0x1A && ZFKeyQuery(0x78) == 0x1B && ZFKeyQuery(0x63) == 0x1C &&
+          ZFKeyQuery(0x76) == 0x15 && ZFKeyQuery(0x60) == 0x16 && ZFKeyQuery(0x62) == 0x66,
+          "F1/F2/F3/F4/F5/F7 -> EC queries 1A/1B/1C/15/16/66");
+    CHECK(!ZFKeyQuery(0x61) && !ZFKeyQuery(0x00) && !ZFKeyQuery(0x6F) && !ZFKeyQuery(0x71), "F6, A, F12, F15 are never bridged");
+    CHECK(!ZFKeyBridgeWanted(0, NO, 0, YES), "no bridge before the first wake");
+    CHECK(ZFKeyBridgeWanted(100, NO, 0x800000, YES), "bridge after a wake while hotkeys are dead (Fn flag ignored)");
+    CHECK(!ZFKeyBridgeWanted(100, YES, 0, YES), "no bridge once a real Fn hotkey arrived");
+    CHECK(!ZFKeyBridgeWanted(100, NO, 0x100000, YES) && !ZFKeyBridgeWanted(100, NO, 0x40000, YES), "Cmd/Ctrl+F-key stay normal shortcuts");
+    CHECK(!ZFKeyBridgeWanted(100, NO, 0, NO), "fkeyBridge off -> never");
+    CHECK(ZDeleteToTrash(0x75, 0, YES, NO) && ZDeleteToTrash(0x75, 0x800000 | 0x200000, YES, NO), "Delete in Finder file list -> Move to Trash (Fn/keypad flags ignored)");
+    CHECK(!ZDeleteToTrash(0x75, 0, YES, YES), "Delete while renaming in Finder stays forward delete");
+    CHECK(!ZDeleteToTrash(0x75, 0, NO, NO), "Delete in other apps stays forward delete");
+    CHECK(!ZDeleteToTrash(0x75, 0x100000, YES, NO) && !ZDeleteToTrash(0x75, 0x20000, YES, NO), "Cmd/Shift+Delete untouched");
+    CHECK(!ZDeleteToTrash(0x33, 0, YES, NO), "Backspace untouched");
     printf("%s (%d failure%s)\n", fails ? "SELFTEST FAILED" : "SELFTEST OK", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }

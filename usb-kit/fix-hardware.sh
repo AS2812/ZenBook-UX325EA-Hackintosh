@@ -41,7 +41,7 @@
 # ==============================================================================
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-VERSION="10.7"
+VERSION="10.8"
 
 MODE="apply"; DNS_MODE="dhcp"; DO_NET=1; FORCE_NETRESET=0; NEED_REBOOT=0
 for a in "$@"; do
@@ -351,13 +351,28 @@ if [ "$MODE" = "usbtest" ]; then
       echo "--- Dock: mineffect=$(as_user defaults read com.apple.dock mineffect 2>/dev/null) magnification=$(as_user defaults read com.apple.dock magnification 2>/dev/null) reduceMotion=$RM"; } >> "$OUT"
     echo "    (your password is needed once, to read the graphics / key drivers' log)"
     sec "driver log (dmesg)"; as_root dmesg 2>/dev/null | grep -E 'UX325|brkeys|AsusSMC|atk' | tail -60 >> "$OUT"
-    step "keys" "Before any sleep: play a sound, press volume UP (Fn+F3) 3 times, volume DOWN (Fn+F2) 3 times, MUTE twice, Fn+F5 and Fn+F4."
-    echo "    LID TEST (2 rounds). Press Enter after each round."
-    step "lid" "Round 1: close the lid, wait 20 s, open it, log in. Then press Fn+F5, Fn+F4, Fn+F3 (volume up), Fn+F1 (mute) twice and Fn+F7 (keyboard light)."
-    step "lid2" "Round 2: close the lid, wait 1 MINUTE, open it, log in. Then press Fn+F5, Fn+F4, Fn+F3, Fn+F1 twice and Fn+F7."
+    # v10.8: speakers after a lid wake (AppleALC layout 66 = layout 11 + speaker amp on at wake)
+    sound_check() {   # $1 label  $2 answer key
+        osascript -e 'set volume without output muted' -e 'if output volume of (get volume settings) < 40 then set volume output volume 60' >/dev/null 2>&1
+        echo "    Playing a test sound now (3 pings from the laptop speakers) ..."
+        for _i in 1 2 3; do afplay /System/Library/Sounds/Ping.aiff 2>/dev/null; done
+        sec "sound + Wi-Fi: $1"
+        { as_user "$HB" audio
+          echo "--- layout in use: $(ioreg -r -c AppleHDAController -w0 -l 2>/dev/null | grep -oE '"alc-layout-id" = <[0-9a-f]*>' | head -1)"
+          echo "--- Wi-Fi now: $(networksetup -getairportnetwork en0 2>&1 | tail -1), IP $(ipconfig getifaddr en0 2>/dev/null || echo none)"; } >> "$OUT" 2>&1
+        ask "Did you HEAR the 3 pings from the laptop speakers? (y/n):" "$2"
+    }
+    sound_check "before sleep" speakers_before
+    step "keys" "Before any sleep: press volume UP (Fn+F3) 3 times, volume DOWN (Fn+F2) 3 times, MUTE (Fn+F1) twice, Fn+F5 and Fn+F4."
+    step "delete key" "Delete key: on the Desktop right-click > New Folder, click the new folder ONCE, then press the key NEXT TO THE POWER BUTTON. The folder should go to the Trash."
+    echo "    LID TEST (2 rounds). Press Enter after each round - a test sound plays after each one."
+    step "lid" "Round 1: close the lid, wait 20 s, open it, log in. Wait until the Wi-Fi icon is connected. Then press Fn+F5, Fn+F4, Fn+F3 (volume up), Fn+F1 (mute) twice and Fn+F7 (keyboard light)."
+    sound_check "after lid round 1 (20 s)" speakers_round1
+    step "lid2" "Round 2: close the lid, wait 1 MINUTE, open it, log in. Wait until the Wi-Fi icon is connected. Then press Fn+F5, Fn+F4, Fn+F3, Fn+F1 twice and Fn+F7."
+    sound_check "after lid round 2 (1 min)" speakers_round2
     run "EC state + event poll (BrightnessKeys-UX325)" sh -c "ioreg -r -c BrightnessKeys -l -w0 2>/dev/null | grep -E 'UX325'; echo '(UX325ECDiag = ECNO, ECUP, EC status, OS type, OS driver, lid, ATKP, ECNT calls, drained, last event, polled, ATK flushes, lid changes by poll, blind-query events, Fn-lock now, Fn-lock saved, Fn-lock re-applied)'; /usr/bin/log show --last 30m --style compact --predicate 'eventMessage CONTAINS \"UX325 EC\"' 2>/dev/null | tail -30"
-    run "Wi-Fi state" sh -c "networksetup -getairportpower en0 2>&1; ifconfig en0 2>&1 | head -6; kextstat -l 2>/dev/null | grep -i itlwm; system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,30p'; grep -E '\\[wifi\\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -15; /usr/bin/log show --last boot --style compact --predicate 'eventMessage CONTAINS[c] \"itlwm\"' 2>/dev/null | head -25"
-    run "lid / wake after the test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12; /usr/bin/log show --last 10m --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"clamshell\" OR eventMessage CONTAINS \"UX325\" OR eventMessage CONTAINS \"Wake reason\")' 2>/dev/null | tail -60; grep -E 'wake \+|wake: brightness|after wake|f14/f15|native slider|mute key' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
+    run "Wi-Fi state" sh -c "networksetup -getairportpower en0 2>&1; ifconfig en0 2>&1 | head -6; kextstat -l 2>/dev/null | grep -i itlwm; system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,30p'; grep -E '\\[wifi\\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -15; /usr/bin/log show --last boot --style compact --predicate 'eventMessage CONTAINS[c] \"itlwm\"' 2>/dev/null | head -25; echo '--- Wi-Fi driver instance (empty = AirportItlwm did not attach):'; ioreg -r -c AirportItlwm -w0 -d1 2>/dev/null | head -3; echo '--- Wi-Fi PCI device 8086:a0f0 (AX201):'; ioreg -r -c IOPCIDevice -w0 -l 2>/dev/null | grep -B12 '\"device-id\" = <f0a00000>' | grep -E '\+-o|IOName|pcidebug' | head -4"
+    run "lid / wake after the test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12; /usr/bin/log show --last 10m --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"clamshell\" OR eventMessage CONTAINS \"UX325\" OR eventMessage CONTAINS \"Wake reason\")' 2>/dev/null | tail -60; grep -E 'wake \+|wake: brightness|after wake|f14/f15|native slider|mute key|Delete key|key tap ready' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
     if [ "${TESTALL:-0}" = 1 ]; then
     step "power" "Press the POWER button once (the Mac sleeps). Wake it with a key, log in. Then press Fn+F5, volume up (Fn+F3) and MUTE twice."
     step "wifi" "Wait until the Wi-Fi icon shows it is connected (up to 2 minutes). Then press Enter."
@@ -373,7 +388,8 @@ if [ "$MODE" = "usbtest" ]; then
     ask "Before sleep: each volume press moved the volume ONE step and mute worked? (y/n):" keys_before
     ask "Round 1 (20 s): screen came back AND Fn keys (brightness, volume, mute, keyboard light) worked? (y/n):" lid_round1
     ask "Round 2 (1 min): screen came back AND Fn keys worked? (y/n):" lid_round2
-    ask "Wi-Fi worked during this test? (y/n):" wifi
+    ask "After EACH lid opening the Wi-Fi connected again by itself (within about 30 s)? (y/n):" wifi
+    ask "The key next to the power button sent the new folder to the Trash? (y/n):" delete_key
     if [ "${TESTALL:-0}" = 1 ]; then
     ask "Fn+F4/F5 changed the brightness? (y/n):" brightness_keys
     ask "Control Centre DISPLAY slider changed the brightness? (y/n):" cc_slider

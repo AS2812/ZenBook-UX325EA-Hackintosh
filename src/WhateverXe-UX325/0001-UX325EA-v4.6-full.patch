@@ -1,8 +1,82 @@
+diff --git a/WhateverXe/kern_host.cpp b/WhateverXe/kern_host.cpp
+index 4db9913..2e87898 100644
+--- a/WhateverXe/kern_host.cpp
++++ b/WhateverXe/kern_host.cpp
+@@ -377,6 +377,14 @@ bool XeHost::wrapPanelSetDisplay(IOService *panel,IOService *display) {
+  }
+  return result;
+ }
++// v4.6 (UX325EA): the console image is XRGB8888, but this OLED runs a 30-bit framebuffer
++// (ARGB2101010, also 32 bits per pixel). The raw copy showed the Apple-logo loading screen as
++// yellow / green noise at boot and at the login switch. Expand each channel to 10 bits.
++static inline uint32_t xeXRGB8888To2101010(uint32_t p) {
++	const uint32_t r = (p >> 16) & 0xFF, g = (p >> 8) & 0xFF, b = p & 0xFF;
++	return 0xC0000000U | ((r << 2 | r >> 6) << 20) | ((g << 2 | g >> 6) << 10) | (b << 2 | b >> 6);
++}
++
+ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
+ 	bool backCopy = callbackHost->gotConsoleVinfo && callbackHost->resetFramebuffer == FB_COPY;
+ 	bool zeroFill  = callbackHost->gotConsoleVinfo && callbackHost->resetFramebuffer == FB_ZEROFILL;
+@@ -400,6 +408,7 @@ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
+ 	backCopy = backCopy && callbackHost->consoleBuffer && !verboseBoot;
+ 
+ 	// Now check if the resolution and parameters match
++	bool convert30 = false;
+ 	if (backCopy || zeroFill) {
+ 		IODisplayModeID mode;
+ 		IOIndex depth;
+@@ -412,6 +421,7 @@ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
+ 			DBGLOG("wex", "fb info 2: %u:%u %s %u:%u:%u",
+ 				   pixelInfo.componentCount, pixelInfo.bitsPerComponent, pixelInfo.pixelFormat, pixelInfo.flags, pixelInfo.activeWidth, pixelInfo.activeHeight);
+ 
++			convert30 = !strncmp(pixelInfo.pixelFormat, kIO30BitDirectPixels, sizeof(IOPixelEncoding));
+ 			if (info.v_rowbytes != pixelInfo.bytesPerRow || info.v_width != pixelInfo.activeWidth ||
+ 				info.v_height != pixelInfo.activeHeight || info.v_depth != pixelInfo.bitsPerPixel) {
+ 				backCopy = zeroFill = false;
+@@ -428,6 +438,13 @@ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
+ 	FunctionCast(wrapFramebufferInit, callbackHost->orgFramebufferInit)(fb);
+ 	if (!backCopy) *callbackHost->gIOFBVerboseBootPtr = verboseBoot;
+ 
++	{
++		// v4.6: evidence - when does the framebuffer get re-initialised (boot / login switch)?
++		static uint32_t calls = 0; uint64_t up = 0, ns = 0; clock_get_uptime(&up); absolutetime_to_nanoseconds(up, &ns);
++		uint32_t rec[] {++calls, backCopy, zeroFill, convert30, uint32_t(ns / 1000000), FramebufferViewer::getVramMap(fb) != nullptr};
++		IORegistryEntry::getRegistryRoot()->setProperty("WEXFramebufferInit", rec, sizeof(rec));
++	}
++
+ 	// Finish the framebuffer initialisation by filling with black or copying the image back.
+ 	if (FramebufferViewer::getVramMap(fb)) {
+ 		auto src = reinterpret_cast<uint8_t *>(callbackHost->consoleBuffer);
+@@ -436,7 +453,15 @@ void XeHost::wrapFramebufferInit(IOFramebuffer *fb) {
+ 			DBGLOG("wex", "attempting to copy...");
+ 			// Here you can actually draw at your will, but looks like only on Intel.
+ 			// On AMD you technically can draw too, but it happens for a very short while, and is not worth it.
+-			lilu_os_memcpy(dst, src, info.v_rowbytes * info.v_height);
++			if (convert30 && info.v_depth == 32) {
++				for (uint32_t y = 0; y < info.v_height; y++) {
++					auto s32 = reinterpret_cast<const uint32_t *>(src + size_t(y) * info.v_rowbytes);
++					auto d32 = reinterpret_cast<uint32_t *>(dst + size_t(y) * info.v_rowbytes);
++					for (uint32_t x = 0; x < info.v_width; x++) d32[x] = xeXRGB8888To2101010(s32[x]);
++				}
++			} else {
++				lilu_os_memcpy(dst, src, info.v_rowbytes * info.v_height);
++			}
+ 		} else if (zeroFill) {
+ 			// On AMD we do a zero-fill to ensure no visual glitches.
+ 			DBGLOG("wex", "doing zero-fill...");
 diff --git a/WhateverXe/kern_xe.cpp b/WhateverXe/kern_xe.cpp
-index dd72071..5a95cc5 100644
+index dd72071..a47af94 100644
 --- a/WhateverXe/kern_xe.cpp
 +++ b/WhateverXe/kern_xe.cpp
-@@ -13,6 +13,7 @@
+@@ -1,6 +1,7 @@
+ #include "kern_display13_color.hpp"
+ #include <mach/clock.h>
+ #include <IOKit/IOMessage.h>
++#include <IOKit/pwr_mgt/RootDomain.h>
+ #include <IOKit/graphics/IOGraphicsTypes.h>
+ //
+ //  kern_xe.cpp
+@@ -13,6 +14,7 @@
  #include "kern_dsi_native_backing.hpp"
  #include "kern_dsi_native_mode.hpp"
  #include "kern_xe.hpp"
@@ -10,7 +84,7 @@ index dd72071..5a95cc5 100644
  #include "kern_framebuffer_donor.hpp"
  #include "kern_xelp_os.hpp"
  #include "kern_xelp_call_target.hpp"
-@@ -13277,6 +13278,28 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
+@@ -13277,6 +13279,28 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
  				IORegistryEntry::getRegistryRoot()->setProperty("TGLWEGOptimalLanesRouted", routed);
  				patcher.clearError();
  			}
@@ -39,7 +113,7 @@ index dd72071..5a95cc5 100644
  			tglAUXLock = IOSimpleLockAlloc();
  			tglDisplayTraceEnabled=checkKernelArgument("-wex-display-trace");
     tglInitTransitionTrace(tglDisplayTraceEnabled);
-@@ -16892,18 +16915,89 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
+@@ -16892,18 +16916,89 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
  
  // Observe native lane selection. The r62 maximum-lane override was rejected;
  // successful first-visible r59 also used the same one-to-four-lane sequence.
@@ -133,7 +207,7 @@ index dd72071..5a95cc5 100644
  	static uint32_t sequence {};
  	r[10] = __sync_add_and_fetch(&sequence, 1);
  	char key[48]; snprintf(key, sizeof(key), "TGLOptimalLanesLast%u", static_cast<uint32_t>(r[10]) % 32);
-@@ -16915,6 +17009,200 @@ uint32_t XE::wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bp
+@@ -16915,6 +17010,229 @@ uint32_t XE::wrapTGLOptimalLaneCount(void *port, const void *timing, uint32_t bp
  	return result;
  }
  
@@ -230,6 +304,23 @@ index dd72071..5a95cc5 100644
 +	IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightReapply", r, sizeof(r));
 +}
 +
++// v4.4: Shut Down / Restart showed green dots on a black screen: the eDP signal stops while the
++// OLED is still lit. Set the panel to 0 nits first (Intel interface), so it is plain black.
++IOReturn XE::tglEDPBLShutdown(void *, void *, UInt32 messageType, IOService *, void *, vm_size_t) {
++	auto s = callbackXE;
++	if ((messageType == kIOMessageSystemWillPowerOff || messageType == kIOMessageSystemWillRestart) &&
++	    s && s->tglEDPBacklight && s->tglEDPSinkPort && s->tglEDPBLState == 1 && s->tglEDPBLIface == 2) {
++		uint8_t buf[4] {};
++		const bool ok = XE::wrapTGLWriteAUX(s->tglEDPSinkPort, 0x354, buf, sizeof(buf)) == 0;
++		// v4.5: 0 nits alone still showed green dots - also put the panel to sleep (DPCD
++		// SET_POWER = D3), the standard eDP way to blank it before the link goes away.
++		uint8_t d3 = 0x02;
++		const bool off = XE::wrapTGLWriteAUX(s->tglEDPSinkPort, 0x600, &d3, 1) == 0;
++		SYSLOG("wex", "UX325 panel black before %s (nits %d, D3 %d)", messageType == kIOMessageSystemWillPowerOff ? "power off" : "restart", ok, off);
++	}
++	return kIOReturnSuccess;
++}
++
 +uint32_t XE::wrapTGLHwSetBacklight(void *controller, uint32_t level) {
 +	// UX325EA (Samsung ATNA33XC11 OLED): the donor drives only the PCH PWM duty (0xC8258)
 +	// unless an Apple Camellia TCON is present. An OLED has no PWM backlight, so macOS
@@ -294,6 +385,8 @@ index dd72071..5a95cc5 100644
 +			s->tglEDPBLMaxNits = nits >= 50 && nits <= 10000 ? nits : 512;
 +		}
 +		s->tglEDPBLState = (intel || vesa) ? 1 : 2;
++		if (intel && !s->tglEDPBLShutdownNotifier)
++			s->tglEDPBLShutdownNotifier = registerPrioritySleepWakeInterest(&XE::tglEDPBLShutdown, nullptr, nullptr);
 +		uint64_t r[] {s->tglEDPBLState, caps.set, caps.enable, caps.wide, caps.maximum, s->tglEDPBLIface, s->tglEDPBLMaxNits,
 +			uint64_t(tcon[0]) | uint64_t(tcon[1]) << 8 | uint64_t(tcon[2]) << 16 | uint64_t(tcon[3]) << 24};
 +		IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightCaps", r, sizeof(r));
@@ -318,6 +411,16 @@ index dd72071..5a95cc5 100644
 +	}
 +	__sync_add_and_fetch(ok ? &applied : &failed, 1);
 +	{
++		// v4.4: timeline of the last 24 panel writes {ms since boot, macOS level, nits | ok << 31}
++		// (the "black for a few seconds after the password" report needs timestamps)
++		static uint32_t hist[24][3] {}; static uint32_t histN = 0;
++		uint64_t up = 0, ns = 0; clock_get_uptime(&up); absolutetime_to_nanoseconds(up, &ns);
++		auto &e = hist[histN % 24]; e[0] = uint32_t(ns / 1000000); e[1] = level; e[2] = written | (ok ? 0x80000000U : 0); histN++;
++		uint32_t ordered[24][3] {}; const uint32_t n = histN < 24 ? histN : 24;
++		for (uint32_t i = 0; i < n; i++) memcpy(ordered[i], hist[(histN - n + i) % 24], sizeof(ordered[i]));
++		IORegistryEntry::getRegistryRoot()->setProperty("WEXTGLEDPBacklightHistory", ordered, n * sizeof(ordered[0]));
++	}
++	{
 +		// v4.2: timeline evidence (e.g. "screen goes black at once" on Shut Down): log every
 +		// change between off (level 0) and on, plus the first write. Two lines per sleep cycle.
 +		static uint32_t lastLevel = UINT32_MAX;
@@ -334,7 +437,7 @@ index dd72071..5a95cc5 100644
  uint32_t XE::wrapTGLDPPower(void *port, uint8_t state) {
  	auto caller = __builtin_return_address(0);
  	tglConnectionRecord(port, 4, false, 0, state, caller);
-@@ -16928,6 +17216,9 @@ uint32_t XE::wrapTGLDPPower(void *port, uint8_t state) {
+@@ -16928,6 +17246,9 @@ uint32_t XE::wrapTGLDPPower(void *port, uint8_t state) {
  	const auto effective = static_cast<uint8_t>(record[3]);
  	tglAUXRecord(port, 2, false, 0, state, effective);
  	const auto result = FunctionCast(wrapTGLDPPower, s->orgTGLDPPower)(port, effective);
@@ -344,7 +447,7 @@ index dd72071..5a95cc5 100644
  	tglConnectionRecord(port, 4, true, result, effective, caller);
  	tglAUXRecord(port, 2, true, result, state, effective);
  	clock_get_uptime(&uptime); absolutetime_to_nanoseconds(uptime, record + 1);
-@@ -19674,6 +19965,20 @@ uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t l
+@@ -19674,6 +19995,20 @@ uint32_t XE::wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t l
  		return FunctionCast(wrapTGLReadAUX, callbackXE->orgTGLReadAUX)(port, address, data, length);
  	});
  	tglDPCDRecord(port, address, data, length, false, true, r, caller);
@@ -366,10 +469,10 @@ index dd72071..5a95cc5 100644
  }
  
 diff --git a/WhateverXe/kern_xe.hpp b/WhateverXe/kern_xe.hpp
-index e6b18a7..5215898 100644
+index e6b18a7..4fe9d57 100644
 --- a/WhateverXe/kern_xe.hpp
 +++ b/WhateverXe/kern_xe.hpp
-@@ -558,12 +558,32 @@ private:
+@@ -558,12 +558,33 @@ private:
  	mach_vm_address_t tglPGFuseWaitFunction {};
  	mach_vm_address_t tglComboPLLFractionCaller {};
  	bool tglSinkFramingReady {};
@@ -389,6 +492,7 @@ index e6b18a7..5215898 100644
 +	uint32_t tglEDPBLMaxNits {};
 +	uint32_t tglEDPBLWantLevel {UINT32_MAX};   // v4.3: last level macOS asked for
 +	bool tglEDPBLPending {};                  // v4.3: that request arrived while the panel was off
++	IONotifier *tglEDPBLShutdownNotifier {};  // v4.4: panel black before power off / restart
 +	mach_vm_address_t orgTGLHwSetBacklight {};
 +	mach_vm_address_t orgTGLSetupDisplayTiming {};
  	bool tglComboAUXGateReady {};
@@ -402,11 +506,12 @@ index e6b18a7..5215898 100644
  	static void tglObserveCursorMemory(void *fb);
  	mach_vm_address_t orgTGLCursorSetup {}, orgTGLRestoreGTT {}, orgTGLCursorImage {};
  	static uint32_t wrapTGLCursorSetup(void *controller);
-@@ -763,6 +783,7 @@ private:
+@@ -763,6 +784,8 @@ private:
  	static void wrapTGLEnablePipe(void *controller, void *fb, void *path, const void *timing);
  	static uint32_t wrapTGLReadAUX(void *port, uint32_t address, void *data, uint32_t length);
  	static uint32_t wrapTGLWriteAUX(void *port, uint32_t address, void *data, uint32_t length);
 +	static void tglEDPBLReapply(XE *s, void *port);
++	static IOReturn tglEDPBLShutdown(void *target, void *refCon, UInt32 messageType, IOService *provider, void *arg, vm_size_t argSize);
  	static uint32_t wrapTGLI2CAUX(void *port, uint32_t command, uint32_t *packet, uint32_t length, uint8_t flag);
  	mach_vm_address_t orgTGLFreeResources {}, orgTGLFreePathResources {}, orgTGLAllocateResources {};
  	mach_vm_address_t orgTGLFBDisable {}, orgTGLReleaseResources {}, orgTGLCommitResources {};

@@ -1,6 +1,6 @@
-# WhateverXe 0.8.3 — UX325EA patch (v4.3)
+# WhateverXe 0.8.3 — UX325EA patch (v4.6)
 
-`0001-UX325EA-v4.3-full.patch` applies to
+`0001-UX325EA-v4.6-full.patch` applies to
 [WhateverXe](https://github.com/b00t0x/WhateverXe) **0.8.3** (`git apply` or `patch -p1`).
 It produces `EFI/OC/Kexts/WhateverXe-UX325-v4.kext`. Every change is opt-in by boot-arg:
 without them the driver behaves exactly like upstream 0.8.3.
@@ -12,6 +12,16 @@ without them the driver behaves exactly like upstream 0.8.3.
 | `-wex-tgl-edp-bl` | **Real OLED brightness.** Routes `AppleIntelFramebufferController::hwSetBacklight`. The donor framebuffer only drives the PCH PWM (0xC8258), which an OLED ignores. The patch sets the panel's own brightness over DPCD: Intel's HDR/OLED interface (0x340–0x357: enable 0x344 bit 4, nits in 0x354/0x355, as Linux `intel_dp_aux_backlight.c`), range 0..EDID max luminance (CTA HDR metadata, 616 nits on the ATNA33XC11), otherwise VESA eDP AUX brightness. Publishes `WEXTGLEDPBacklightCaps/Last/Reapply` and `WEXTGLEDPPanelDPCD`. |
 | `-wex-tgl-edp-bl-vesa` | Forces the VESA registers even when the Intel interface is present (diagnosis). |
 | `-wex-tgl-edp-bl-zero` | Brightness 0 = panel black (MacBook behaviour). Without it the lowest level keeps 0.5 % of the maximum (3 nits). |
+
+Always active with `-wex-tgl-edp-bl` (no extra boot-arg):
+
+* **v4.4 – panel off at shutdown.** A priority sleep/wake handler writes nits 0 (DPCD 0x354) on
+  power-off/restart, so the OLED goes black instead of showing stale (green) pixels while the
+  system powers down. `WEXTGLEDPBacklightHistory` keeps the last 24 brightness writes.
+* **v4.6 – clean loading screen.** WhateverXe copies the boot/login console image back into the
+  framebuffer. That image is 8-bit XRGB, the framebuffer is 30-bit ARGB2101010, so a raw copy
+  showed yellow/green noise. The copy now converts each pixel to 10 bits per colour when the
+  framebuffer is 30-bit. `WEXFramebufferInit` = {calls, copies, zero fills, converted, ms, vram}.
 
 v4.3 also re-sends the last requested brightness at panel power-on (DPCD `SET_POWER` D0) when
 macOS asked for it while the panel was still unpowered — on lid open the panel otherwise stayed

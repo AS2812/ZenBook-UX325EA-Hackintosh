@@ -4,7 +4,7 @@ OpenCore EFI, ACPI patches, helper tools and **patched drivers** for the ZenBook
 (UX325EA, Intel Core i7‑1165G7, Iris Xe 96 EU, Samsung OLED). It gives **full Metal graphics
 acceleration on macOS Sonoma 14.8.9** and **real OLED brightness**, with the Control Centre slider
 and native keys. It also makes these work: Wi‑Fi, Bluetooth, sleep with the lid or the power
-button, every Fn key (including after sleep), the keyboard backlight, the NumberPad and
+button, top-row hardware controls, the keyboard backlight, the NumberPad and
 trackpad gestures.
 
 Before these patches:
@@ -34,7 +34,7 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 | Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
 | Audio | Realtek ALC294 | AppleALC 1.9.8, `alcid=11`; helper enforces mute | ✅ speakers, headphones; mute/unmute with bezel |
 | Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
-| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑WAKE** | ✅ brightness, volume, mute — also after sleep |
+| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑WAKE** | Brightness, volume and mute. SSDT-KEYS maps six plain function keys reported after lid wake. Physical retest pending. |
 | Keyboard backlight | EC | **SSDT‑KBL** (Fn+F7 cycles 0→3) | ✅ |
 | Trackpad + NumberPad | ELAN I2C HID (04F3:3134) | VoodooI2C/HID + **ZenBookHelper** | ✅ tap, two‑finger menu, gestures, NumberPad + calculator |
 | Sleep / wake | S3 | power button → sleep (helper), lid, password after wake | ✅ power button; lid: fix in v10.0 (driver v4.3 + helper 8.15) |
@@ -61,7 +61,7 @@ the same SSD is supported (the sync script never touches `\EFI\Microsoft`).
 EFI/OC/config.plist          daily profile: GPU acceleration + every fix (= config-gpu.plist)
 EFI/OC/config-gpu.plist      the same (used by fix-hardware.sh --gpu-keep / the GPU guard)
 EFI/OC/config-stable.plist   safe profile: same fixes, no acceleration (-wexoff), verbose boot
-EFI/OC/ACPI/                 SSDT-KBL (Fn keys, keyboard light), SSDT-PNLF (_UID 19),
+EFI/OC/ACPI/                 SSDT-KBL (Fn keys, keyboard light), SSDT-KEYS (internal action row), SSDT-PNLF (_UID 19),
                              SSDT-WAKE (volume/mute route, ATK queue, wake/shutdown hooks), ...
 EFI/OC/Kexts/WhateverXe-UX325-v4.kext   patched WhateverXe (src/WhateverXe-UX325)
 EFI/OC/Kexts/BrightnessKeys-UX325.kext  BrightnessKeys 1.0.3 + volume/mute codes (src/BrightnessKeys-UX325)
@@ -70,6 +70,7 @@ usb-kit/                     tools for the USB's data partition
   fix-hardware.sh            apply fixes, --test (guided test + report), --audit, --diagnose, --gpu-*
   sync-efi-to-ssd.sh         copy the EFI to the internal SSD (boot without USB), Windows-safe
   ZenBookHelper.app          power button, mute, NumberPad, wake brightness, Wi-Fi watchdog
+  Check FPS After Restart.app    one-time Finder setup for the next desktop login
   UX325EA-RESCUE/GPU/gpu-guard.sh   one-boot GPU test guard with automatic rollback
   README.txt                 end-user guide and full change log
 src/                         ACPI sources, driver patches + test harnesses, helper source, USB map

@@ -1,6 +1,20 @@
 ZenBook UX325EA Hackintosh - v10.0 (2026-11-20)
 =================================================
 
+Internal keyboard and lid wake
+  Boot macOS through this USB's OpenCore. F1 mutes, F2/F3 change volume,
+  F4/F5 change OLED brightness and F7 cycles the keyboard light. The new
+  mapping handles bare function keys on the built-in keyboard from boot.
+  Try the keys again after closing the lid, reopening it and signing in.
+  To restore standard shortcuts for these six keys, disable SSDT-KEYS.aml
+  under OpenCore > ACPI > Add and restart.
+
+Frame-rate check
+  In Finder on macOS, open "Check FPS After Restart" on this USB once.
+  Restart and sign in. The app tests a moving triangle on the built-in
+  display and opens FPS Result.txt with the measured presentation rate.
+
+
 v10.0 - lid wake fix + ready to make permanent
   v9.9 test: EVERYTHING works (shutdown shows apps closing, brightness keys + slider, volume,
   mute, two-finger menu, Wi-Fi, keys after power-button sleep) - except: lid open = black screen.

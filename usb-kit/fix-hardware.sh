@@ -819,7 +819,7 @@ ok "Window/Dock animations shortened."
 # ------------------------------------------------------------------------------
 echo ""
 echo "[4/6] Function keys..."
-setdef NSGlobalDomain com.apple.keyboard.fnState -bool true && ok "F1..F12 act as standard function keys" || warn "fnState not set"
+setdef NSGlobalDomain com.apple.keyboard.fnState -bool false && ok "Hardware functions have priority on the top row" || warn "fnState not set"
 info "Fn+F4 / Fn+F5 : display brightness down / up  (EC _Q15/_Q16 -> SSDT-KBL v5.2 -> AsusSMC + BrightnessKeys -> ZenBookHelper)"
 info "Fn+F7         : keyboard backlight cycle 0 -> 1 -> 2 -> 3 -> 0 (EC _Q66 -> SSDT-KBL v5.2)"
 info "Ctrl+Option+Up/Down : brightness step through the daemon (backup path)"

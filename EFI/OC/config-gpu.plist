@@ -72,6 +72,14 @@
 			</dict>
 			<dict>
 				<key>Comment</key>
+				<string>UX325EA internal keyboard hardware keys</string>
+				<key>Enabled</key>
+				<true/>
+				<key>Path</key>
+				<string>SSDT-KEYS.aml</string>
+			</dict>
+			<dict>
+				<key>Comment</key>
 				<string>v9.8: ASUS hotkeys after sleep (queue self-heal + INIT on wake) + shutdown USB-wake fix</string>
 				<key>Enabled</key>
 				<true/>

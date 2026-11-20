@@ -22,7 +22,7 @@ Intel AX201, ELAN 04F3:3134 touchpad. macOS Sonoma 14.8.9 with the Iris Xe drive
 
 ## 2. Fn volume / mute dead after sleep
 
-All Fn keys arrive as embedded-controller queries:
+When the firmware delivers a hardware action, the embedded controller sends these queries.
 
 | Keys | EC queries | Route |
 |---|---|---|
@@ -51,6 +51,23 @@ ACPI simulation (acpiexec, DSDT + all SSDTs):
 * The keyboard-light code `0xC5` still reaches AsusSMC.
 * Brightness still gives both `Notify(ATKD)` and `Notify(DD1F, 0x86)`.
 * `_WAK(3)` flushes the queue and calls INIT.
+
+### Plain function keys after a lid wake
+
+A later ZenBook capture showed another failure after unlocking. Pressing the volume and brightness keys produced ordinary F3, F4 and F5 events, and Terminal displayed their escape sequences. The USB setup script also explicitly selected standard function keys. It now selects hardware actions for the top row.
+
+`SSDT-KEYS.aml` supplies a `Custom PS2 Map` to VoodooPS2Keyboard on the internal keyboard at `\_SB.PC00.LPCB.PS2K`. If the firmware sends a plain function key, the keyboard driver translates it before it reaches the foreground app.
+
+| Internal key | Action | Driver output |
+|---|---|---|
+| F1 | Mute | ADB mute |
+| F2 / F3 | Volume down / up | ADB volume down / up |
+| F4 / F5 | OLED brightness down / up | F14 / F15, handled by the installed ZenBookHelper |
+| F7 | Cycle keyboard illumination | ACPI callback `RKA7` invokes the existing `_Q66` handler on key-down |
+
+This mapping applies from boot, including after wake and when these six keys are pressed with modifiers. It only applies to this internal PS/2 keyboard. To restore ordinary F-key shortcuts on these keys, disable `SSDT-KEYS.aml` under OpenCore → ACPI → Add and reboot.
+
+**On-device check.** Boot macOS using the updated USB OpenCore. At the desktop, press F3 once and check the volume, then F4 and F5 and check the OLED, and F7 and check the keyboard light. Repeat after closing the lid, reopening it and unlocking. The mapping and the firmware callback can be checked off-device. The physical volume, light levels and lid-wake result require this laptop test.
 
 ## 3. Mute key
 

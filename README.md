@@ -30,11 +30,11 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 | GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.6**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit; clean loading screen at boot and login (v4.6) |
 | Display | Samsung OLED eDP 1.4 (ATNA33XC11), 2 lanes | patched link setup (2 × 2.7 Gbps) | ✅ |
 | Brightness | OLED, Intel DPCD nits interface | patch `-wex-tgl-edp-bl` + **SSDT‑PNLF `_UID` 19** | ✅ real panel brightness, Control Centre slider, Fn+F4/F5, bezel, 0 = black |
-| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ reconnects 5–9 s after a lid wake; once the driver did not start at boot (v10.8 test records why) |
+| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ reconnects about 5 s after a lid wake (v10.8 test) |
 | Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
-| Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake: fix in v10.8, test pending |
+| Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake ✅ (v10.8 test) |
 | Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
-| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑KEYS**, **SSDT‑WAKE** | ✅ brightness, volume, mute, keyboard light, also after lid wake (SSDT‑KEYS maps the six keys the EC reports as plain F‑keys after a wake). Delete key (next to power) = Move to Trash in Finder (helper 8.19, test pending) |
+| Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑KEYS**, **SSDT‑WAKE** | ✅ brightness, volume, mute, keyboard light, also after lid wake (SSDT‑KEYS maps the six keys the EC reports as plain F‑keys after a wake). Delete key (next to power) = Move to Trash in Finder ✅ (helper 8.19) |
 | Keyboard backlight | EC | **SSDT‑KBL** (Fn+F7 cycles 0→3) | ✅ |
 | Trackpad + NumberPad | ELAN I2C HID (04F3:3134) | VoodooI2C/HID + **ZenBookHelper** | ✅ tap, two‑finger menu, gestures, NumberPad + calculator |
 | Sleep / wake | S3 | power button → sleep (helper), lid (EC sensor poll), password after wake | ✅ power button and lid: screen and keys come back (tested 20 s and 1 min) |

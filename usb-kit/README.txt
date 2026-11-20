@@ -1,4 +1,4 @@
-ZenBook UX325EA Hackintosh - v10.0 (2026-11-20)
+ZenBook UX325EA Hackintosh - v10.7 (2026-11-20)
 =================================================
 
 Internal keyboard and lid wake
@@ -14,6 +14,86 @@ Frame-rate check
   Restart and sign in. The app tests a moving triangle on the built-in
   display and opens FPS Result.txt with the measured presentation rate.
 
+
+v10.7 - Fn-lock after a lid wake, real-colour loading screen
+  v10.6 test: lid sleeps every time now (sensor poll), Genie + Dock magnification work. After a
+  lid wake Fn+F1/F4/F5/F7 type plain keys; yellow/green pixels at boot and during the login
+  switch (the EDID fix removed the extra mode switch that used to hide them with black).
+  - SSDT-WAKE v1.9: the EC forgets the ASUS Fn-lock (WMI 0x00100023, EC byte FEST, EC command
+    0x72/0xB3) in a lid-closed sleep. XPTS(3) saves it, XWAK and the first 10 s of the poll
+    write it back - the same thing Linux asus-wmi does on every resume.
+  - Driver v4.6: WhateverXe copies the Apple-logo loading screen into the framebuffer at boot
+    and when macOS re-initialises it; that copy was raw 8-bit data in a 30-bit (10-bit per
+    colour) framebuffer -> yellow/green noise. Now converted pixel by pixel to 10-bit.
+  - Helper 8.17 logs plain F1-F12 presses after a wake (Fn-lock evidence).
+
+v10.6 - lid without EC events, black login fix attempt, D3 at shutdown, Dock effects
+  v10.5 test: AsusSMC now registers (ATKP 1, OSDT 1) and volume works; after a lid wake the
+  EC still flags no events. Brightness timeline: the panel stayed at full brightness during
+  login, so the black screen after the password is not brightness.
+  - SSDT-WAKE v1.8 + BrightnessKeys-UX325 poll (from each wake until the next sleep):
+    lid from the EC hall sensor (LSTE changed -> Notify LID0) and a direct EC event query
+    once a second for events the EC queued without announcing them.
+  - Login black screen: the panel EDID lists 1920x1080@60 twice, so macOS has two identical
+    modes (0x80001000 / 0x80001001) and switched between them at startup - every switch
+    retrains the OLED link (black). OpenCore now gives the framebuffer the same EDID with the
+    duplicate removed (AAPL00,override-no-connect): one mode, nothing to switch.
+  - Driver v4.5: before Shut Down / Restart the panel also goes to sleep (DPCD D3), not only
+    0 nits (green dots were still visible).
+  - Dock: Genie minimize, magnification and launch animation switched on by --test.
+
+v10.5 - ROOT CAUSE of the dead Fn keys after a lid wake; black shutdown; login timeline
+  The EC snapshot after a wake (v10.4) showed ATKP = 0 and OSDT = 0: the ASUS hotkey
+  registration (ATKD.INIT) had never run since day one. AsusSMC passes an 8-byte argument to
+  the ASUS WMI method WMNB, which reads 20 bytes (IIA0..IIA4) and aborts with
+  AE_AML_BUFFER_LIMIT before INIT (reproduced in acpiexec). The EC therefore ran in its
+  "no OS driver" fallback (volume/mute as plain keys), which does not survive a lid-closed sleep.
+  - SSDT-WAKE v1.7: WMNB wrapper pads the argument to 32 bytes (OpenCore renames WMNB -> XMNB
+    in all profiles). AsusSMC now registers like the Windows ATK driver. Its battery charge
+    limit (80%) is blocked, so charging stays exactly as before.
+  - Driver v4.4: the OLED is set to 0 nits just before Shut Down / Restart -> plain black,
+    no green dots. Records the last 24 brightness writes with timestamps
+    (WEXTGLEDPBacklightHistory) to find the black screen after the password.
+  - --test: asks about the last shutdown and this login, checks volume before sleep, 2 lid rounds.
+
+v10.4 - EC "display on" after a lid wake, Wi-Fi recovery
+  v10.3 test: lid sleep/wake OK, but after the first lid wake the EC sent NO events at all (the
+  2nd lid close was not seen - the Mac slept by idle timer - and no Fn keys); the poll found
+  nothing waiting. This firmware is built for Modern Standby: Windows calls PEPD._DSM display
+  off/on on lid close/open -> H_EC.ECNT(1)/ECNT(0) = EC commands 0x5D/0x5E (low power enter/
+  exit). macOS (S3) never sends "exit", so the EC stays in low power after a lid-closed sleep.
+  - SSDT-WAKE v1.6: every wake calls ECNT(0) like the display-on notification.
+  - BrightnessKeys-UX325: EC poll only for 10 min after each wake (not at boot); EC state
+    snapshot (ECNO, status, OS type, OS driver flag, lid) as property UX325ECDiag.
+  - Helper 8.16: Wi-Fi switched off at login -> switched on; logs Wi-Fi off / no interface.
+
+v10.3 - after a lid wake macOS takes no more EC events (Fn keys, lid close, battery)
+  v10.2 test: the wake drain found the stuck lid event, but afterwards the kernel got NO event at
+  all - no lid close (no 2nd sleep), no Fn keys. macOS' EC event channel stays dead after a lid
+  wake (power-button wakes are fine). Fallback that does not depend on it:
+  - BrightnessKeys-UX325 calls DD1F.ZECP every 300 ms. When the EC has had an event waiting for
+    two polls in a row (macOS takes them within milliseconds when it works), SSDT-WAKE v1.5
+    reads it and runs the firmware's own handler (_Q15 brightness, _Q1C volume, _Q0D lid ...).
+    It never steps in while macOS' channel works. Log: "UX325 EC poll" (kernel).
+
+v10.2 - Fn keys frozen after a lid wake
+  v10.1: the screen comes back after the lid, but every Fn key stays dead. The embedded
+  controller delivers events one at a time (SCI_EVT, read by the OS with QR_EC). The lid-open
+  event that woke the laptop is not read during resume, so the controller waits forever and
+  never reports newer events (Fn keys, AC, battery). Power-button wakes are not EC events,
+  which is why they never had the problem.
+  - SSDT-WAKE v1.4: on every wake drain pending EC events (up to 8, through the controller's
+    status/command ports, like Linux after resume) and pass lid / AC / battery ones to macOS.
+  - --test: two lid rounds, each followed by Fn+F5, Fn+F4, volume and mute.
+
+v10.1 - lid: macOS kept thinking the lid was closed
+  v10.0 test: everything works except the lid. Kernel log of the failed lid test: clamshell
+  sleep, then wakes at :29 / :44 / :54 (the last one on a key press) - every one with
+  "clamshell closed 1"; "Clamshell opened" came only after the restart. The EC's "lid open"
+  event that woke the laptop was lost during resume, so macOS kept the built-in screen off.
+  - SSDT-WAKE v1.3: on every wake Notify(LID0) -> macOS re-reads _LID (the EC hall sensor).
+    The first 30 Fn presses after a wake re-check the lid too (Fn+F5 brings the screen back).
+  - --test now tests only the lid (2 rounds); --test-all runs the full test.
 
 v10.0 - lid wake fix + ready to make permanent
   v9.9 test: EVERYTHING works (shutdown shows apps closing, brightness keys + slider, volume,

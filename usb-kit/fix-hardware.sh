@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Master Hardware & Performance Fixes v10.0
+# ASUS ZenBook 13 OLED (UX325EA) - Master Hardware & Performance Fixes v10.7
 # (Wi-Fi + Apple ID + Fn+F4/F5 OLED dimming + NumberPad/Calculator + Trackpad + Audit)
 # Every run saves its output to UX325EA-RESCUE/TEST-RESULTS on the USB.
 #
@@ -41,7 +41,7 @@
 # ==============================================================================
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-VERSION="10.0"
+VERSION="10.7"
 
 MODE="apply"; DNS_MODE="dhcp"; DO_NET=1; FORCE_NETRESET=0; NEED_REBOOT=0
 for a in "$@"; do
@@ -50,7 +50,8 @@ for a in "$@"; do
         --audit|-a)  MODE="audit" ;;
         --collect)   MODE="collect" ;;
         --diagnose)  MODE="diagnose" ;;
-        --test)      MODE="usbtest" ;;
+        --test)      MODE="usbtest"; TESTALL=0 ;;   # v10.1: lid only (everything else confirmed working)
+        --test-all)  MODE="usbtest"; TESTALL=1 ;;
         --numpad-probe|--led-test) MODE="led-test" ;;
         --gpu-test)  MODE="gpu-test" ;;
         --gpu-trial) MODE="gpu-trial" ;;
@@ -282,6 +283,15 @@ if [ "$MODE" = "usbtest" ]; then
         done
         ok "ZenBookHelper updated ${VI:-?} -> $VU (permissions kept) - waiting 5 s for it to start"; sleep 5
     else ok "ZenBookHelper $VI is current"; fi
+    # Dock: Genie minimize, magnification, launch animation (user preferences, no sudo)
+    as_user defaults write com.apple.dock mineffect -string genie
+    as_user defaults write com.apple.dock magnification -bool true
+    as_user defaults write com.apple.dock largesize -int 96
+    as_user defaults write com.apple.dock launchanim -bool true
+    as_user killall Dock 2>/dev/null
+    RM="$(as_user defaults read com.apple.universalaccess reduceMotion 2>/dev/null)"
+    ok "Dock: Genie minimize + magnification on (Scale: System Settings > Desktop & Dock)"
+    [ "$RM" = "1" ] && warn "Reduce motion is ON - it disables Genie and magnification: System Settings > Accessibility > Display > Reduce motion = off"
     # 2. like a MacBook: password right after sleep (lid or power button)
     if ! sysadminctl -screenLock status 2>&1 | grep -q "immediate"; then
         echo ""; echo "    Lock screen: ask for your password right after sleep (lid or power button)."
@@ -313,8 +323,11 @@ if [ "$MODE" = "usbtest" ]; then
     run "helper status" as_user "$HB" status
     run "audio before" as_user "$HB" audio
     [ "$BOOTED" = "internal SSD (normal setup)" ] && warn "This Mac started from the SSD. For the test setup: Shut Down, then power on WITH the USB plugged in."
+    if [ "${TESTALL:-0}" = 1 ]; then
     echo ""; echo "    First a question about your LAST shutdown (before this start):"
     ask "BEFORE this test you closed and opened the lid: did the screen come back? (y/n):" lid_before_test
+    fi
+    if [ "${TESTALL:-0}" = 1 ]; then
     echo "    Now do each short test, then press Enter."
     step "brightness keys" "Press Fn+F4 (darker) and Fn+F5 (brighter) several times (at 0 the screen is black, like before)."
     step "volume" "Play a sound. Press volume UP (Fn+F3) 3 times and volume DOWN (Fn+F2) 3 times."
@@ -322,7 +335,30 @@ if [ "$MODE" = "usbtest" ]; then
     step "mute" "Play a sound or video. Press MUTE (Fn+F1) once, wait 3 s, press it again. You should see the crossed speaker, then the speaker with bars."
     run "audio after mute test" as_user "$HB" audio
     step "two-finger" "Tap with TWO fingers on the desktop: the menu should open (like a Mac). Press Esc. Do it 3 times."
-    step "lid" "Close the lid, wait 20 seconds, open it. Wait 10 s. If it stays black: press a key, then the power button once. Log in, press Fn+F5 and volume up."
+    fi
+    echo ""; echo "    About your LAST Shut Down and THIS start:"
+    ask "Last Shut Down: was the screen plain black (no green dots)? (y/n):" shutdown_black
+    ask "This start: normal loading screen after the password (no black, no yellow/green pixels)? (y/n):" login_normal
+    sec "boot / login brightness timeline"
+    { echo "boot: $(sysctl -n kern.boottime 2>/dev/null)"
+      echo "login (helper start): $(grep -E 'brightness daemon v' "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | tail -1 | cut -c1-23)"
+      echo "WEXTGLEDPBacklightHistory = {ms since boot, macOS level 0..65535, nits | ok<<31} x24:"
+      ioreg -p IOService -l -w0 -d 1 2>/dev/null | grep -o '"WEXTGLEDPBacklightHistory" = <[0-9a-f]*>'
+      echo "--- display mode switches and login (whole boot)"
+      /usr/bin/log show --last boot --style compact --predicate '(process == "WindowServer" AND (eventMessage CONTAINS "IOFBSetDisplayModeAndDepth: Setting" OR eventMessage CONTAINS[c] "fade")) OR (process == "kernel" AND eventMessage CONTAINS "modeset") OR (process == "loginwindow" AND eventMessage CONTAINS "login state")' 2>/dev/null | grep -vE 'Partial modeset' | head -80
+      echo "--- EDID in use (single mode = duplicate timing removed): $(ioreg -r -c AppleBacklightDisplay -w0 -l 2>/dev/null | grep -o '"IODisplayEDID" = <[0-9a-f]\{180\}' | cut -c164-200)"
+      echo "--- framebuffer re-init {count, copy, zero, 8->10-bit, ms since boot, vram}: $(ioreg -p IOService -l -w0 -d 1 2>/dev/null | grep -o '"WEXFramebufferInit" = <[0-9a-f]*>')"
+      echo "--- Dock: mineffect=$(as_user defaults read com.apple.dock mineffect 2>/dev/null) magnification=$(as_user defaults read com.apple.dock magnification 2>/dev/null) reduceMotion=$RM"; } >> "$OUT"
+    echo "    (your password is needed once, to read the graphics / key drivers' log)"
+    sec "driver log (dmesg)"; as_root dmesg 2>/dev/null | grep -E 'UX325|brkeys|AsusSMC|atk' | tail -60 >> "$OUT"
+    step "keys" "Before any sleep: play a sound, press volume UP (Fn+F3) 3 times, volume DOWN (Fn+F2) 3 times, MUTE twice, Fn+F5 and Fn+F4."
+    echo "    LID TEST (2 rounds). Press Enter after each round."
+    step "lid" "Round 1: close the lid, wait 20 s, open it, log in. Then press Fn+F5, Fn+F4, Fn+F3 (volume up), Fn+F1 (mute) twice and Fn+F7 (keyboard light)."
+    step "lid2" "Round 2: close the lid, wait 1 MINUTE, open it, log in. Then press Fn+F5, Fn+F4, Fn+F3, Fn+F1 twice and Fn+F7."
+    run "EC state + event poll (BrightnessKeys-UX325)" sh -c "ioreg -r -c BrightnessKeys -l -w0 2>/dev/null | grep -E 'UX325'; echo '(UX325ECDiag = ECNO, ECUP, EC status, OS type, OS driver, lid, ATKP, ECNT calls, drained, last event, polled, ATK flushes, lid changes by poll, blind-query events, Fn-lock now, Fn-lock saved, Fn-lock re-applied)'; /usr/bin/log show --last 30m --style compact --predicate 'eventMessage CONTAINS \"UX325 EC\"' 2>/dev/null | tail -30"
+    run "Wi-Fi state" sh -c "networksetup -getairportpower en0 2>&1; ifconfig en0 2>&1 | head -6; kextstat -l 2>/dev/null | grep -i itlwm; system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,30p'; grep -E '\\[wifi\\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -15; /usr/bin/log show --last boot --style compact --predicate 'eventMessage CONTAINS[c] \"itlwm\"' 2>/dev/null | head -25"
+    run "lid / wake after the test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12; /usr/bin/log show --last 10m --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"clamshell\" OR eventMessage CONTAINS \"UX325\" OR eventMessage CONTAINS \"Wake reason\")' 2>/dev/null | tail -60; grep -E 'wake \+|wake: brightness|after wake|f14/f15|native slider|mute key' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
+    if [ "${TESTALL:-0}" = 1 ]; then
     step "power" "Press the POWER button once (the Mac sleeps). Wake it with a key, log in. Then press Fn+F5, volume up (Fn+F3) and MUTE twice."
     step "wifi" "Wait until the Wi-Fi icon shows it is connected (up to 2 minutes). Then press Enter."
     run "Wi-Fi details" sh -c "system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,80p'"
@@ -332,16 +368,22 @@ if [ "$MODE" = "usbtest" ]; then
     run "sleep/wake history" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12"
     run "Wi-Fi (helper watchdog)" sh -c "grep -E '\[wifi\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
     run "panel brightness driver after tests" sh -c "ioreg -p IOService -l -w0 -d 1 2>/dev/null | grep -E '\"WEXTGLEDPBacklight[A-Za-z]*\"'; ioreg -r -c AppleBacklightDisplay -w0 -l 2>/dev/null | grep -oE '\"(bklt|brightness)\"=[^}]*}'"
+    fi
     echo ""; printf "  Quick answers (type, then Enter):\n"
+    ask "Before sleep: each volume press moved the volume ONE step and mute worked? (y/n):" keys_before
+    ask "Round 1 (20 s): screen came back AND Fn keys (brightness, volume, mute, keyboard light) worked? (y/n):" lid_round1
+    ask "Round 2 (1 min): screen came back AND Fn keys worked? (y/n):" lid_round2
+    ask "Wi-Fi worked during this test? (y/n):" wifi
+    if [ "${TESTALL:-0}" = 1 ]; then
     ask "Fn+F4/F5 changed the brightness? (y/n):" brightness_keys
     ask "Control Centre DISPLAY slider changed the brightness? (y/n):" cc_slider
     ask "Volume up/down worked (before sleep)? (y/n):" volume
     ask "Mute and unmute both worked? (y/n):" mute
     ask "Two fingers opened the menu? (y/n):" two_finger_menu
-    ask "After the LID test: did the screen come back by itself when you opened the lid? (y/n):" lid_screen
     ask "After LID sleep: brightness, volume and mute keys worked? (y/n):" keys_after_lid
     ask "After POWER-button sleep: brightness, volume and mute keys worked? (y/n):" keys_after_power
     ask "Wi-Fi connected again by itself? (y/n):" wifi
+    fi
     sec "user answers"; cat "$ANS" >> "$OUT"; rm -f "$ANS"
     run "helper log" tail -200 "$USER_HOME/Library/Logs/ZenBookHelper.log"
     sync; echo ""; echo "[*] Saved to $OUT"

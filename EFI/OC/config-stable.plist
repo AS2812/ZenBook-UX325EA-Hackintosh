@@ -325,6 +325,45 @@
 				RFNEVA==
 				</data>
 			</dict>
+			<dict>
+				<key>Base</key>
+				<string></string>
+				<key>BaseSkip</key>
+				<integer>0</integer>
+				<key>Comment</key>
+				<string>Rename ATKD.WMNB to XMNB (pad AsusSMC WMI arguments -&gt; SSDT-WAKE)</string>
+				<key>Count</key>
+				<integer>1</integer>
+				<key>Enabled</key>
+				<true/>
+				<key>Find</key>
+				<data>
+				V01OQgs=
+				</data>
+				<key>Limit</key>
+				<integer>0</integer>
+				<key>Mask</key>
+				<data>
+				</data>
+				<key>OemTableId</key>
+				<data>
+				</data>
+				<key>Replace</key>
+				<data>
+				WE1OQgs=
+				</data>
+				<key>ReplaceMask</key>
+				<data>
+				</data>
+				<key>Skip</key>
+				<integer>0</integer>
+				<key>TableLength</key>
+				<integer>0</integer>
+				<key>TableSignature</key>
+				<data>
+				RFNEVA==
+				</data>
+			</dict>
 		</array>
 		<key>Quirks</key>
 		<dict>
@@ -464,6 +503,17 @@
 			</dict>
 			<key>PciRoot(0x0)/Pci(0x2,0x0)</key>
 			<dict>
+				<key>AAPL00,override-no-connect</key>
+				<data>
+				AP///////wBMg1hBAAAAAAoeAQS1HRF4AgzxrlI8uSMM
+				UFQAAAABAQEBAQEBAQEBAQEBAQEBvDaAtHA4IEAwIIgA
+				JqUQAAAbAAAAEAAAAAAAAAAAAAAAAAAAAAAADwDRCTzR
+				CTwogAAAAAAAAAAA/gBBVE5BMzNYQzExLTAgAU0CAw8A
+				4wWAAOYGBQF0YAcAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+				AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+				AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+				AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAtw==
+				</data>
 				<key>framebuffer-patch-enable</key>
 				<data>
 				AQAAAA==

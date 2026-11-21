@@ -41,7 +41,7 @@
 # ==============================================================================
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-VERSION="10.8"
+VERSION="10.10"
 
 MODE="apply"; DNS_MODE="dhcp"; DO_NET=1; FORCE_NETRESET=0; NEED_REBOOT=0
 for a in "$@"; do
@@ -322,7 +322,9 @@ if [ "$MODE" = "usbtest" ]; then
     as_user "$HB" twofinger right >/dev/null 2>&1
     run "helper status" as_user "$HB" status
     run "audio before" as_user "$HB" audio
-    [ "$BOOTED" = "internal SSD (normal setup)" ] && warn "This Mac started from the SSD. For the test setup: Shut Down, then power on WITH the USB plugged in."
+    # v10.10: since make-mac-only the SSD has the same OpenCore as this USB - both are fine
+    [ "$BOOTED" = "internal SSD (normal setup)" ] && ok "Started from the internal SSD (macOS-only setup)"
+    run "Wi-Fi health now (helper 8.21 probe)" as_user "$HB" wifiprobe
     if [ "${TESTALL:-0}" = 1 ]; then
     echo ""; echo "    First a question about your LAST shutdown (before this start):"
     ask "BEFORE this test you closed and opened the lid: did the screen come back? (y/n):" lid_before_test
@@ -359,7 +361,9 @@ if [ "$MODE" = "usbtest" ]; then
         sec "sound + Wi-Fi: $1"
         { as_user "$HB" audio
           echo "--- layout in use: $(ioreg -r -c AppleHDAController -w0 -l 2>/dev/null | grep -oE '"alc-layout-id" = <[0-9a-f]*>' | head -1)"
-          echo "--- Wi-Fi now: $(networksetup -getairportnetwork en0 2>&1 | tail -1), IP $(ipconfig getifaddr en0 2>/dev/null || echo none)"; } >> "$OUT" 2>&1
+          echo "--- Wi-Fi now: $(networksetup -getairportnetwork en0 2>&1 | tail -1), IP $(ipconfig getifaddr en0 2>/dev/null || echo none)"
+          echo "--- speaker amplifier (helper 8.20):"; grep 'speaker amp' "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | tail -4
+          echo "--- Wi-Fi probe:"; as_user "$HB" wifiprobe 2>&1 | tail -4; } >> "$OUT" 2>&1
         ask "Did you HEAR the 3 pings from the laptop speakers? (y/n):" "$2"
     }
     sound_check "before sleep" speakers_before
@@ -372,7 +376,7 @@ if [ "$MODE" = "usbtest" ]; then
     sound_check "after lid round 2 (1 min)" speakers_round2
     run "EC state + event poll (BrightnessKeys-UX325)" sh -c "ioreg -r -c BrightnessKeys -l -w0 2>/dev/null | grep -E 'UX325'; echo '(UX325ECDiag = ECNO, ECUP, EC status, OS type, OS driver, lid, ATKP, ECNT calls, drained, last event, polled, ATK flushes, lid changes by poll, blind-query events, Fn-lock now, Fn-lock saved, Fn-lock re-applied)'; /usr/bin/log show --last 30m --style compact --predicate 'eventMessage CONTAINS \"UX325 EC\"' 2>/dev/null | tail -30"
     run "Wi-Fi state" sh -c "networksetup -getairportpower en0 2>&1; ifconfig en0 2>&1 | head -6; kextstat -l 2>/dev/null | grep -i itlwm; system_profiler SPAirPortDataType 2>/dev/null | sed -n '1,30p'; grep -E '\\[wifi\\]' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -15; /usr/bin/log show --last boot --style compact --predicate 'eventMessage CONTAINS[c] \"itlwm\"' 2>/dev/null | head -25; echo '--- Wi-Fi driver instance (empty = AirportItlwm did not attach):'; ioreg -r -c AirportItlwm -w0 -d1 2>/dev/null | head -3; echo '--- Wi-Fi PCI device 8086:a0f0 (AX201):'; ioreg -r -c IOPCIDevice -w0 -l 2>/dev/null | grep -B12 '\"device-id\" = <f0a00000>' | grep -E '\+-o|IOName|pcidebug' | head -4"
-    run "lid / wake after the test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12; /usr/bin/log show --last 10m --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"clamshell\" OR eventMessage CONTAINS \"UX325\" OR eventMessage CONTAINS \"Wake reason\")' 2>/dev/null | tail -60; grep -E 'wake \+|wake: brightness|after wake|f14/f15|native slider|mute key|Delete key|key tap ready' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
+    run "lid / wake after the test" sh -c "pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -12; /usr/bin/log show --last 10m --style compact --predicate 'process == \"kernel\" AND (eventMessage CONTAINS[c] \"clamshell\" OR eventMessage CONTAINS \"UX325\" OR eventMessage CONTAINS \"Wake reason\")' 2>/dev/null | tail -60; grep -E 'wake \+|wake: brightness|after wake|f14/f15|native slider|mute key|Delete key|key tap ready|speaker amp' '$USER_HOME/Library/Logs/ZenBookHelper.log' 2>/dev/null | tail -40"
     if [ "${TESTALL:-0}" = 1 ]; then
     step "power" "Press the POWER button once (the Mac sleeps). Wake it with a key, log in. Then press Fn+F5, volume up (Fn+F3) and MUTE twice."
     step "wifi" "Wait until the Wi-Fi icon shows it is connected (up to 2 minutes). Then press Enter."
@@ -389,6 +393,7 @@ if [ "$MODE" = "usbtest" ]; then
     ask "Round 1 (20 s): screen came back AND Fn keys (brightness, volume, mute, keyboard light) worked? (y/n):" lid_round1
     ask "Round 2 (1 min): screen came back AND Fn keys worked? (y/n):" lid_round2
     ask "After EACH lid opening the Wi-Fi connected again by itself (within about 30 s)? (y/n):" wifi
+    ask "Since the last test, whenever Wi-Fi showed connected, did websites always load? (y/n):" wifi_always_works
     ask "The key next to the power button sent the new folder to the Trash? (y/n):" delete_key
     if [ "${TESTALL:-0}" = 1 ]; then
     ask "Fn+F4/F5 changed the brightness? (y/n):" brightness_keys
@@ -400,6 +405,8 @@ if [ "$MODE" = "usbtest" ]; then
     ask "After POWER-button sleep: brightness, volume and mute keys worked? (y/n):" keys_after_power
     ask "Wi-Fi connected again by itself? (y/n):" wifi
     fi
+    sec "Wi-Fi health history (helper 8.21: drops, dead links, reconnects, 5-min quality)"
+    grep -E 'Wi-Fi (quality|connected but|passed no traffic|reconnect|traffic OK|health|lost|back|has no IP|power cycle)|internet not reachable|DNS ' "$USER_HOME/Library/Logs/ZenBookHelper.log" 2>/dev/null | tail -120 >> "$OUT"
     sec "user answers"; cat "$ANS" >> "$OUT"; rm -f "$ANS"
     run "helper log" tail -200 "$USER_HOME/Library/Logs/ZenBookHelper.log"
     sync; echo ""; echo "[*] Saved to $OUT"

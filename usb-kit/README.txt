@@ -1,5 +1,53 @@
-ZenBook UX325EA Hackintosh - v10.8 (2026-11-20)
+ZenBook UX325EA Hackintosh - v10.10 (2026-11-21)
 =================================================
+
+DONE 2026-11-21: macOS only. make-mac-only.sh deleted Windows, macOS has the whole SSD
+(1024 GB) and starts from the power button without this USB (OpenCore on the SSD, no menu).
+Keep this USB as the rescue stick: power on holding Alt, or tap Esc and choose the USB.
+
+v10.10 - Wi-Fi that stays usable (helper 8.21)
+  Problem: sometimes Wi-Fi shows connected but nothing loads. The old watchdog only acted when
+  Wi-Fi had NO IP address, so a stalled link (weak 2.4 GHz signal, -72..-86 dBm in the last
+  test) stayed stuck until you switched Wi-Fi off and on yourself.
+  - Every 10 s while connected the helper checks: does the router answer (ping), does the
+    internet answer (1.1.1.1 / 8.8.8.8, no DNS needed), does name lookup (DNS) work.
+  - Router AND internet silent for ~30 s -> it reconnects Wi-Fi by itself (off/on; at most once
+    per 3 min, 3 times per hour). Router answers but internet does not -> your provider/router,
+    Wi-Fi is left alone. Everything is logged, plus a quality line every 5 minutes.
+  - Check by hand any time:  ~/Applications/ZenBookHelper.app/Contents/MacOS/ZenBookHelper wifiprobe
+  - Off switch: defaults write com.zenbook.helper wifiHealthCheck -bool NO
+  - Also included: helper 8.20 speaker fix (amplifier on after a fresh start).
+  - Test v10.10: no "started from the SSD" warning any more (the SSD is the setup now); records
+    the Wi-Fi probe after each lid round and the Wi-Fi health history.
+  Best Wi-Fi: your router was only seen on 2.4 GHz. If it has 5 GHz, switch it on in the router
+  and join that network - it is faster and has less interference. Near the router it is great
+  (-32 to -50 dBm); two walls away 2.4 GHz drops to -85 dBm, where any Wi-Fi card struggles.
+  Undo: UX325EA-RESCUE/BACKUPS/pre-v1010-*/ (helper 8.20, test v10.9).
+
+macOS ONLY - whole SSD, no USB needed (make-mac-only.sh, tested on disk images)
+  1. Start macOS from this USB, plug in the charger, open Terminal.
+  2. Check (changes nothing, shows what would be deleted):
+         sudo sh "/Volumes/Install macOS Sonoma/make-mac-only.sh"
+  3. Do it (type ERASE WINDOWS when asked - ALL Windows files are lost):
+         sudo sh "/Volumes/Install macOS Sonoma/make-mac-only.sh" --apply
+     Deletes the Windows partitions, grows macOS over the whole SSD, copies this USB's
+     OpenCore to the SSD (no menu), removes Windows Boot Manager. If Windows lies BEFORE
+     macOS on the disk it stops without changing anything (macOS cannot grow backwards).
+  4. Shut Down, unplug the USB, power on tapping Esc, choose the SSD entry ONCE.
+     From then on: power button -> macOS. Keep this USB as the rescue stick.
+
+v10.9 - speakers right after a fresh start (helper 8.20)
+  v10.8 test: keys, lid (20 s and 1 min), Wi-Fi after the lid, Delete key and the speakers
+  AFTER a lid sleep all work. But right after a fresh start the speakers stayed silent until
+  the first sleep: layout 66 switches the speaker amplifier on at every wake, not at startup.
+  - Helper 8.20 checks the ALC294 speaker amplifier (EAPD of pin 0x14) through AppleALC's
+    verb interface (alcverbs=1, already set) at login, after each wake and whenever sound
+    starts, and switches it on if it is off. Every action is logged ("speaker amp ...").
+    Off switch: defaults write com.zenbook.helper speakerAmp -bool NO
+  - Test v10.9 = v10.8 + the helper's speaker-amplifier log after each sound check.
+    Run it right after a fresh start, BEFORE closing the lid (a sleep turns the speakers on
+    by itself and would hide the result).
+  Undo: copy UX325EA-RESCUE/BACKUPS/pre-v109-*/ZenBookHelper.app back (helper 8.19).
 
 v10.8 - speakers after the lid, Delete key, boot menu, Wi-Fi capture
   v10.7 test (keyboard file SSDT-KEYS loaded): the screen and F-keys came back after both lid

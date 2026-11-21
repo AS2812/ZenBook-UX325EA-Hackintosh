@@ -30,9 +30,9 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 | GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.6**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit; clean loading screen at boot and login (v4.6) |
 | Display | Samsung OLED eDP 1.4 (ATNA33XC11), 2 lanes | patched link setup (2 × 2.7 Gbps) | ✅ |
 | Brightness | OLED, Intel DPCD nits interface | patch `-wex-tgl-edp-bl` + **SSDT‑PNLF `_UID` 19** | ✅ real panel brightness, Control Centre slider, Fn+F4/F5, bezel, 0 = black |
-| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog | ✅ reconnects about 5 s after a lid wake (v10.8 test) |
+| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog with **link-health check** (helper 8.21) | ✅ reconnects about 5 s after a lid wake (v10.8 test). 8.21 also repairs "connected but nothing loads" stalls by itself (test pending) |
 | Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
-| Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake ✅ (v10.8 test) |
+| Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake ✅ (v10.8 test); right after a fresh start: helper 8.20 switches the speaker amplifier on (test pending) |
 | Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
 | Keyboard, Fn keys | PS/2 + ASUS ATK | VoodooPS2, AsusSMC, **BrightnessKeys‑UX325**, **SSDT‑KBL**, **SSDT‑KEYS**, **SSDT‑WAKE** | ✅ brightness, volume, mute, keyboard light, also after lid wake (SSDT‑KEYS maps the six keys the EC reports as plain F‑keys after a wake). Delete key (next to power) = Move to Trash in Finder ✅ (helper 8.19) |
 | Keyboard backlight | EC | **SSDT‑KBL** (Fn+F7 cycles 0→3) | ✅ |
@@ -50,8 +50,9 @@ Thunderbolt 4 hot‑plug of PCIe devices (docks / eGPU).
 **Not tested:** external HDMI / USB‑C monitors.
 
 Software: OpenCore **1.0.8**, macOS **Sonoma 14.8.9 (23J631)** — WhateverXe 0.8.3 needs
-exactly this build. `SecureBootModel=Disabled`, `DmgLoading=Any`. Dual boot with Windows on
-the same SSD is supported (the sync script never touches `\EFI\Microsoft`).
+exactly this build, so **turn off automatic macOS updates**. `SecureBootModel=Disabled`,
+`DmgLoading=Any`. Dual boot with Windows on the same SSD is supported (the sync script never
+touches `\EFI\Microsoft`), or give macOS the whole SSD with `make-mac-only.sh` (below).
 
 ---
 
@@ -70,7 +71,9 @@ EFI/OC/Kexts/USBMap-UX325EA.kext        codeless USB map: Bluetooth (HS10) + web
 usb-kit/                     tools for the USB's data partition
   fix-hardware.sh            apply fixes, --test (guided test + report), --audit, --diagnose, --gpu-*
   sync-efi-to-ssd.sh         copy the EFI to the internal SSD (boot without USB), Windows-safe
-  ZenBookHelper.app          power button, mute, NumberPad, wake brightness, Wi-Fi watchdog
+  make-mac-only.sh           optional: delete Windows, macOS gets the whole SSD, no USB needed
+  ZenBookHelper.app          power button, mute, NumberPad, wake brightness, speaker amp, Delete key,
+                             Wi-Fi watchdog + link-health check (`ZenBookHelper wifiprobe`)
   Check FPS After Restart.app    one-time Finder setup for the next desktop login
   UX325EA-RESCUE/GPU/gpu-guard.sh   one-boot GPU test guard with automatic rollback
   README.txt                 end-user guide and full change log
@@ -108,6 +111,16 @@ docs/                        root-cause write-ups
    This copies the setup to the internal SSD and leaves `\EFI\Microsoft` untouched. Shut down,
    unplug the USB and power on: Apple logo → macOS, like a real Mac. Hold **Option (Alt)** at
    power-on for the boot menu (Windows, recovery).
+
+8. Optional, **macOS only** (deletes Windows and all its files):
+   ```sh
+   sudo sh "/Volumes/<USB>/make-mac-only.sh"            # check only, changes nothing
+   sudo sh "/Volumes/<USB>/make-mac-only.sh" --apply    # type ERASE WINDOWS
+   ```
+   It deletes the Windows partitions, grows the macOS APFS container over the whole SSD (live,
+   FileVault stays on), copies OpenCore to the SSD with the menu off and removes Windows Boot
+   Manager. It refuses (and changes nothing) if a Windows partition lies *before* macOS, because
+   APFS can only grow forwards. Tested on the UX325EA: 341.5 GB → 1024 GB.
 
 Rollback at any time: `fix-hardware.sh --gpu-off`, or double-click `GPU-OFF.command` from
 another Mac.

@@ -7,8 +7,8 @@
     <key>CFBundleName</key><string>ZenBookHelper</string>
     <key>CFBundleDisplayName</key><string>ZenBookHelper</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>8.19</string>
-    <key>CFBundleVersion</key><string>8.19</string>
+    <key>CFBundleShortVersionString</key><string>8.21</string>
+    <key>CFBundleVersion</key><string>8.21</string>
     <key>LSMinimumSystemVersion</key><string>12.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>

@@ -26,13 +26,20 @@
 #import <AudioToolbox/AudioToolbox.h>
 #include <ifaddrs.h>
 #include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <dlfcn.h>
 #include <signal.h>
 #include <math.h>
 #include <objc/message.h>
 
-#define ZB_VERSION "8.19"
+#define ZB_VERSION "8.21"
 static NSString *const kSuite   = @"com.zenbook.helper.settings";
 static NSString *const kCmdNote = @"com.zenbook.helper.cmd";
 static const float kMinLevel  = 0.10f;   // never go fully black on the OLED
@@ -110,6 +117,25 @@ static BOOL ZFKeyBridgeWanted(double wakeAt, BOOL nativeSinceWake, uint64_t flag
 static BOOL ZDeleteToTrash(int64_t kc, uint64_t flags, BOOL finderFront, BOOL textFocus) {
     const uint64_t mods = 0x100000 | 0x40000 | 0x80000 | 0x20000;   // Cmd, Ctrl, Opt, Shift
     return kc == 0x75 && finderFront && !textFocus && !(flags & mods);
+}
+// v8.20: ALC294 speaker amplifier = EAPD bit 1 of the speaker pin 0x14 (GET 0xF0C / SET 0x70C).
+// A failed read answers 0xFFFFFFFF; only a real answer without bit 1 means "amplifier off".
+static BOOL ZEAPDNeedsOn(uint32_t resp) { return resp != 0xFFFFFFFFu && resp <= 0xFF && !(resp & 0x02); }
+static uint16_t ZEAPDOnValue(uint32_t resp) { return (uint16_t)((resp & 0x05) | 0x02); }   // keep BTL / L-R swap bits
+// v8.21 Wi-Fi link health. "Connected but dead": AirportItlwm keeps the association and the IP
+// while no frames get through (weak 2.4 GHz signal) - macOS shows Wi-Fi as connected and nothing
+// loads. Verdict per probe: 0 fine, 1 internet down beyond the router (do not touch Wi-Fi),
+// 2 the Wi-Fi link passes no traffic. If the router never answered a ping since joining (some
+// block ICMP), only the internet probe can tell.
+static int ZLinkVerdict(BOOL gwOK, BOOL gwEverOK, BOOL netOK) {
+    if (netOK) return 0;
+    if (gwEverOK) return gwOK ? 1 : 2;
+    return 2;
+}
+// Reconnect only after 3 dead probes in a row (~30 s), not within 60 s of a wake/login (still
+// joining), at most once per 3 min and 3 times per hour.
+static BOOL ZShouldReconnect(int deadStreak, double now, double lastFix, int fixesLastHour, double sinceEvent) {
+    return deadStreak >= 3 && sinceEvent > 60 && (lastFix <= 0 || now - lastFix > 180) && fixesLastHour < 3;
 }
 
 typedef struct { int maxX, maxY; } ZAxisMax;
@@ -235,6 +261,19 @@ static BOOL ZBuiltIn(AudioDeviceID d) {
     UInt32 t = 0, sz = sizeof(t);
     return d && AudioObjectGetPropertyData(d, &a, 0, NULL, &sz, &t) == noErr && t == kAudioDeviceTransportTypeBuiltIn;
 }
+// One HDA verb through AppleALC's user client (needs boot-arg alcverbs=1): method 0 = executeVerb
+// (node, verb, payload) -> codec response.
+static kern_return_t ZALCVerb(uint16_t nid, uint16_t verb, uint16_t param, uint32_t *resp) {
+    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("ALCUserClientProvider"));
+    if (!s) return KERN_NOT_SUPPORTED;
+    io_connect_t c = 0; kern_return_t kr = IOServiceOpen(s, mach_task_self(), 0, &c); IOObjectRelease(s);
+    if (kr != KERN_SUCCESS) return kr;
+    uint64_t in[3] = { nid, verb, param }, out = 0xFFFFFFFFu; uint32_t n = 1;
+    kr = IOConnectCallScalarMethod(c, 0, in, 3, &out, &n);
+    IOServiceClose(c);
+    if (resp) *resp = kr == KERN_SUCCESS ? (uint32_t)out : 0xFFFFFFFFu;
+    return kr;
+}
 static BOOL ZMuted(AudioDeviceID d) {
     for (UInt32 el = 0; el <= 2; el++) {      // main element, then channels 1/2
         AudioObjectPropertyAddress a = { kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, el };
@@ -316,7 +355,23 @@ static BOOL ZShowOSD(long long image, unsigned filled, unsigned total) {
 - (void)start;
 - (void)muteKey;
 @end
-@implementation ZMute { AudioDeviceID _dev; float _saved; BOOL _enforcing; BOOL _softMuted; double _keyAt, _keySeen; int _repeats; }
+@implementation ZMute { AudioDeviceID _dev; float _saved; BOOL _enforcing; BOOL _softMuted; double _keyAt, _keySeen; int _repeats; int _ampLogs, _ampFixes; }
+// v8.20: after a cold start (layout 66) the speaker amplifier stays off until the first sleep;
+// check it at login, after each wake and whenever playback starts, and switch it on if needed.
+// Off switch (no sudo): defaults write com.zenbook.helper speakerAmp -bool NO
+- (void)speakerAmp:(NSString *)why {
+    if ([Defs() objectForKey:@"speakerAmp"] && ![Defs() boolForKey:@"speakerAmp"]) return;
+    uint32_t r = 0xFFFFFFFFu; kern_return_t kr = ZALCVerb(0x14, 0xF0C, 0, &r);
+    if (kr != KERN_SUCCESS || r == 0xFFFFFFFFu) {
+        if (_ampLogs++ < 3) ZLog(@"speaker amp (%@): AppleALC verb interface not available (0x%X)", why, kr);
+        return;
+    }
+    if (!ZEAPDNeedsOn(r)) { if (_ampLogs++ < 6) ZLog(@"speaker amp (%@): on (EAPD 0x%02X)", why, r); return; }
+    uint32_t w = 0, r2 = 0xFFFFFFFFu;
+    kern_return_t k2 = ZALCVerb(0x14, 0x70C, ZEAPDOnValue(r), &w);
+    ZALCVerb(0x14, 0xF0C, 0, &r2);
+    if (_ampFixes++ < 40) ZLog(@"speaker amp (%@): was OFF (EAPD 0x%02X) -> switched on: %s (now 0x%02X)", why, r, k2 == KERN_SUCCESS ? "ok" : "FAILED", r2);
+}
 // v8.11: the mute key itself toggles a real mute (volume 0 / restore), whatever the codec does
 // v8.13: one press = one toggle (a held key used to flip mute ~10 times), and the macOS bezel
 // is shown for unmute too (the speaker with the restored volume level).
@@ -350,6 +405,11 @@ static BOOL ZShowOSD(long long image, unsigned filled, unsigned total) {
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &def, dispatch_get_main_queue(),
         ^(UInt32 n, const AudioObjectPropertyAddress *a) { [self attach]; });
     [self attach];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self speakerAmp:@"login"]; });
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil
+        usingBlock:^(NSNotification *note) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self speakerAmp:@"wake"]; });
+        }];
 }
 - (void)attach {
     AudioDeviceID d = ZDefaultOut();
@@ -359,6 +419,11 @@ static BOOL ZShowOSD(long long image, unsigned filled, unsigned total) {
     AudioObjectPropertyAddress m = ZAddr(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput);
     AudioObjectAddPropertyListenerBlock(d, &m, dispatch_get_main_queue(),
         ^(UInt32 n, const AudioObjectPropertyAddress *a) { if (d == self->_dev) [self enforce]; });
+    AudioObjectPropertyAddress run = ZAddr(kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioObjectPropertyScopeGlobal);
+    AudioObjectAddPropertyListenerBlock(d, &run, dispatch_get_main_queue(), ^(UInt32 n, const AudioObjectPropertyAddress *a) {
+        UInt32 on = 0, sz = sizeof(on);
+        if (d == self->_dev && AudioObjectGetPropertyData(d, &run, 0, NULL, &sz, &on) == noErr && on) [self speakerAmp:@"playback"];
+    });
     ZLog(@"mute: watching built-in output (muted %d, volume %.2f)", ZMuted(d), ZVolume(d));
     [self enforce];
 }
@@ -1430,13 +1495,97 @@ static NSString *ZLinkDesc(CWInterface *i) {
             i.transmitRate, (long)i.rssiValue, ZIPv4(i.interfaceName ?: @"en0") ?: @"none"];
 }
 
+// v8.21 probes (no root needed: macOS allows ICMP datagram sockets for normal users)
+static uint16_t ZInetSum(const void *data, size_t len) {
+    const uint16_t *w = data; uint32_t sum = 0;
+    for (; len > 1; len -= 2) sum += *w++;
+    if (len) sum += *(const uint8_t *)w;
+    sum = (sum >> 16) + (sum & 0xFFFF); sum += sum >> 16;
+    return (uint16_t)~sum;
+}
+// Echo to an IPv4 address: round trip in ms, or -1 (no answer within timeout) / -2 (socket error)
+static double ZPingMs(NSString *ip, double timeout) {
+    struct sockaddr_in to = { .sin_len = sizeof(struct sockaddr_in), .sin_family = AF_INET };
+    if (inet_pton(AF_INET, ip.UTF8String, &to.sin_addr) != 1) return -2;
+    int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    if (s < 0) return -2;
+    static uint16_t seq; uint16_t id = (uint16_t)(getpid() & 0xFFFF), sq = ++seq;
+    uint8_t pkt[24] = { 0 }; struct icmp *ic = (struct icmp *)pkt;
+    ic->icmp_type = ICMP_ECHO; ic->icmp_id = htons(id); ic->icmp_seq = htons(sq);
+    memcpy(pkt + 8, "ZenBook!", 8); ic->icmp_cksum = ZInetSum(pkt, sizeof pkt);
+    double t0 = CFAbsoluteTimeGetCurrent(), res = -1;
+    if (sendto(s, pkt, sizeof pkt, 0, (struct sockaddr *)&to, sizeof to) < 0) { close(s); return -2; }
+    while (CFAbsoluteTimeGetCurrent() - t0 < timeout) {
+        struct pollfd p = { s, POLLIN, 0 };
+        int left = (int)((timeout - (CFAbsoluteTimeGetCurrent() - t0)) * 1000); if (left < 1) left = 1;
+        if (poll(&p, 1, left) <= 0) break;
+        uint8_t buf[512]; ssize_t n = recv(s, buf, sizeof buf, 0);
+        if (n < 8) continue;
+        size_t off = ((buf[0] >> 4) == 4) ? (size_t)(buf[0] & 0x0F) * 4 : 0;   // macOS hands over the IP header
+        if ((size_t)n < off + 8) continue;
+        struct icmp *r = (struct icmp *)(buf + off);
+        if (r->icmp_type == ICMP_ECHOREPLY && ntohs(r->icmp_seq) == sq) { res = (CFAbsoluteTimeGetCurrent() - t0) * 1000; break; }
+    }
+    close(s);
+    return res;
+}
+// TCP handshake to ip:port. A refusal (RST) also proves the path works.
+static BOOL ZTcpReach(const char *ip, int port, double timeout) {
+    struct sockaddr_in a = { .sin_len = sizeof(struct sockaddr_in), .sin_family = AF_INET, .sin_port = htons(port) };
+    if (inet_pton(AF_INET, ip, &a.sin_addr) != 1) return NO;
+    int s = socket(AF_INET, SOCK_STREAM, 0); if (s < 0) return NO;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    int nosig = 1; setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof nosig);
+    BOOL ok = NO;
+    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) ok = YES;
+    else if (errno == EINPROGRESS) {
+        struct pollfd p = { s, POLLOUT, 0 };
+        if (poll(&p, 1, (int)(timeout * 1000)) == 1) {
+            int err = 0; socklen_t l = sizeof err; getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &l);
+            ok = (err == 0 || err == ECONNREFUSED);
+        }
+    } else ok = (errno == ECONNREFUSED);
+    close(s);
+    return ok;
+}
+// Name lookup with a time limit (getaddrinfo itself has none). One lookup at a time.
+static BOOL ZDNSWorks(double timeout) {
+    static _Atomic int busy = 0;
+    if (busy) return NO;
+    busy = 1;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block BOOL ok = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *res = NULL;
+        BOOL r = getaddrinfo("captive.apple.com", "80", &hints, &res) == 0;
+        if (res) freeaddrinfo(res);
+        ok = r; busy = 0; dispatch_semaphore_signal(done);
+    });
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC))) != 0) return NO;
+    return ok;
+}
+// Router of an interface (from DHCP), read once per connection.
+static NSString *ZRouterOf(NSString *ifname) {
+    NSTask *t = [NSTask new]; NSPipe *p = [NSPipe pipe];
+    t.launchPath = @"/usr/sbin/ipconfig"; t.arguments = @[@"getoption", ifname, @"router"];
+    t.standardOutput = p; t.standardError = [NSPipe pipe];
+    @try { [t launch]; } @catch (NSException *e) { return nil; }
+    NSData *d = [p.fileHandleForReading readDataToEndOfFile]; [t waitUntilExit];
+    NSString *s = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    struct in_addr x; return (s.length && inet_pton(AF_INET, s.UTF8String, &x) == 1) ? s : nil;
+}
+
 @interface ZWiFi : NSObject
 @end
-@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; int _powerState; BOOL _firstCheck; double _noIfLog; }
+@implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; int _powerState; BOOL _firstCheck; double _noIfLog;
+    // v8.21 link health
+    dispatch_queue_t _probeQ; BOOL _probing, _gwEverOK; NSString *_gw, *_gwForIP; int _tick, _deadStreak, _dnsStreak, _lastVerdict;
+    double _lastFix, _lastSummary; NSMutableArray *_fixTimes;
+    int _pN, _pGwOK, _pNetOK, _pDnsBad; double _pRtt; long _rssiSum, _rssiMin, _noise; double _rate; long _ch; }
 - (void)start {
-    ZLog(@"Wi-Fi watchdog v%s start", ZB_VERSION);
+    ZLog(@"Wi-Fi watchdog v%s start (link health check every 10 s)", ZB_VERSION);
     CrashLoopGuard(@"wifiStarts");
-    _eventAt = CFAbsoluteTimeGetCurrent();
+    _eventAt = CFAbsoluteTimeGetCurrent(); _lastSummary = _eventAt; _fixTimes = [NSMutableArray new];
     for (NSString *n in @[NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification])
         [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:n object:nil queue:nil usingBlock:^(NSNotification *note) {
             double t = CFAbsoluteTimeGetCurrent(); if (t - self->_eventAt > 5) ZLog(@"wake - watching Wi-Fi reconnection");
@@ -1474,9 +1623,11 @@ static NSString *ZLinkDesc(CWInterface *i) {
         NSString *key = [NSString stringWithFormat:@"%ld/%ld/%.0f", (long)i.activePHYMode, (long)i.wlanChannel.channelNumber, i.transmitRate];
         if (![key isEqualToString:_lastDesc]) { _lastDesc = key; ZLog(@"Wi-Fi up: %@", desc); }
         [Defs() setObject:desc forKey:@"wifiStatus"];
+        [self healthTick:i ip:ip];
         return;
     }
     [Defs() setObject:desc forKey:@"wifiStatus"];
+    _deadStreak = 0;
     if (_wasUp) { _wasUp = NO; ZLog(@"Wi-Fi lost its connection: %@", desc); }
     if (!i.powerOn) return;                                  // switched off by the user
     // v8.14: 8.13 switched Wi-Fi off/on every ~40 s, but AirportItlwm needs up to ~2 min to
@@ -1496,6 +1647,64 @@ static NSString *ZLinkDesc(CWInterface *i) {
             [i setPower:NO error:&e1]; sleep(2); [i setPower:YES error:&e2];
             ZLog(@"Wi-Fi power cycle done%@", (e1 || e2) ? [NSString stringWithFormat:@" (errors: %@ %@)", e1.localizedDescription ?: @"", e2.localizedDescription ?: @""] : @"");
         });
+    }
+}
+// v8.21: every 10 s while Wi-Fi has an IP: does the router answer, does the internet answer?
+// Off switch (no sudo): defaults write com.zenbook.helper wifiHealthCheck -bool NO
+- (void)healthTick:(CWInterface *)i ip:(NSString *)ip {
+    if ([Defs() objectForKey:@"wifiHealthCheck"] && ![Defs() boolForKey:@"wifiHealthCheck"]) return;
+    if ((++_tick % 2) || _probing) return;
+    if (![ip isEqualToString:_gwForIP]) { _gwForIP = ip; _gw = nil; _gwEverOK = NO; _deadStreak = 0; _lastVerdict = 0; }
+    _probing = YES;
+    NSString *ifn = i.interfaceName ?: @"en0", *gw = _gw;
+    long rssi = i.rssiValue, noise = i.noiseMeasurement, ch = i.wlanChannel.channelNumber; double rate = i.transmitRate;
+    if (!_probeQ) _probeQ = dispatch_queue_create("zenbook.wifihealth", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(_probeQ, ^{
+        NSString *g = gw ?: ZRouterOf(ifn);
+        double rtt = g ? ZPingMs(g, 1.5) : -2;
+        if (rtt < 0 && g) rtt = ZPingMs(g, 1.5);            // one lost echo is normal on 2.4 GHz
+        BOOL net = ZTcpReach("1.1.1.1", 443, 2.5) || ZTcpReach("8.8.8.8", 443, 2.5);
+        BOOL dns = net ? ZDNSWorks(3.0) : YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self healthResult:g rtt:rtt net:net dns:dns rssi:rssi noise:noise rate:rate ch:ch iface:i];
+        });
+    });
+}
+- (void)healthResult:(NSString *)g rtt:(double)rtt net:(BOOL)net dns:(BOOL)dns rssi:(long)rssi noise:(long)noise rate:(double)rate ch:(long)ch iface:(CWInterface *)i {
+    _probing = NO;
+    double now = CFAbsoluteTimeGetCurrent();
+    if (g) _gw = g;
+    BOOL gwOK = rtt >= 0;
+    if (gwOK && !_gwEverOK) { _gwEverOK = YES; ZLog(@"Wi-Fi health: router %@ answers (%.0f ms)", g, rtt); }
+    int v = ZLinkVerdict(gwOK, _gwEverOK, net);
+    _pN++; if (gwOK) { _pGwOK++; _pRtt += rtt; } if (net) _pNetOK++; if (!dns) _pDnsBad++;
+    _rssiSum += rssi; if (_pN == 1 || rssi < _rssiMin) _rssiMin = rssi; _noise = noise; _rate = rate; _ch = ch;
+    _deadStreak = (v == 2) ? _deadStreak + 1 : 0;
+    if (v != _lastVerdict) {
+        if (v == 2) ZLog(@"Wi-Fi connected but passing NO traffic (router %@, internet no) - signal %ld dBm, noise %ld, link %.0f Mbps",
+                         _gwEverOK ? @"silent" : @"never answered pings", rssi, noise, rate);
+        else if (v == 1) ZLog(@"internet not reachable beyond the router (router answers %.0f ms) - provider/router problem, Wi-Fi left alone", rtt);
+        else ZLog(@"Wi-Fi traffic OK again (router %@, signal %ld dBm)", gwOK ? [NSString stringWithFormat:@"%.0f ms", rtt] : @"no ping", rssi);
+        _lastVerdict = v;
+    }
+    if (!dns) { if (++_dnsStreak == 3) ZLog(@"DNS (name lookup) not answering for 30 s while the internet works - websites will not open"); }
+    else { if (_dnsStreak >= 3) ZLog(@"DNS answering again"); _dnsStreak = 0; }
+    [Defs() setObject:[NSString stringWithFormat:@"%@ router %@ internet %@ dns %@", v == 0 ? @"ok" : v == 1 ? @"internet-down" : @"NO-TRAFFIC",
+                       gwOK ? [NSString stringWithFormat:@"%.0fms", rtt] : @"-", net ? @"ok" : @"no", dns ? @"ok" : @"no"] forKey:@"wifiTraffic"];
+    while (_fixTimes.count && now - [_fixTimes[0] doubleValue] > 3600) [_fixTimes removeObjectAtIndex:0];
+    if (ZShouldReconnect(_deadStreak, now, _lastFix, (int)_fixTimes.count, now - _eventAt)) {
+        _lastFix = now; [_fixTimes addObject:@(now)]; _deadStreak = 0;
+        ZLog(@"Wi-Fi passed no traffic for ~30 s while connected - reconnecting (Wi-Fi off/on, %lu of max 3 this hour)", (unsigned long)_fixTimes.count);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            NSError *e1 = nil, *e2 = nil;
+            [i setPower:NO error:&e1]; sleep(2); [i setPower:YES error:&e2];
+            ZLog(@"Wi-Fi reconnect done%@", (e1 || e2) ? [NSString stringWithFormat:@" (errors: %@ %@)", e1.localizedDescription ?: @"", e2.localizedDescription ?: @""] : @"");
+        });
+    }
+    if (now - _lastSummary >= 300 && _pN > 0) {
+        ZLog(@"Wi-Fi quality (5 min): router answered %d/%d (avg %.0f ms), internet %d/%d, DNS failures %d, signal avg %ld min %ld dBm, noise %ld dBm, link %.0f Mbps, ch %ld",
+             _pGwOK, _pN, _pGwOK ? _pRtt / _pGwOK : 0.0, _pNetOK, _pN, _pDnsBad, _rssiSum / _pN, _rssiMin, _noise, _rate, _ch);
+        _pN = _pGwOK = _pNetOK = _pDnsBad = 0; _pRtt = 0; _rssiSum = 0; _lastSummary = now;
     }
 }
 @end
@@ -1559,6 +1768,18 @@ static int SelfTest(void) {
     CHECK(!ZDeleteToTrash(0x75, 0, NO, NO), "Delete in other apps stays forward delete");
     CHECK(!ZDeleteToTrash(0x75, 0x100000, YES, NO) && !ZDeleteToTrash(0x75, 0x20000, YES, NO), "Cmd/Shift+Delete untouched");
     CHECK(!ZDeleteToTrash(0x33, 0, YES, NO), "Backspace untouched");
+    CHECK(ZEAPDNeedsOn(0x00) && ZEAPDNeedsOn(0x01) && ZEAPDNeedsOn(0x04), "EAPD bit 1 clear -> speaker amp off");
+    CHECK(!ZEAPDNeedsOn(0x02) && !ZEAPDNeedsOn(0x03) && !ZEAPDNeedsOn(0x06), "EAPD bit 1 set -> amp already on");
+    CHECK(!ZEAPDNeedsOn(0xFFFFFFFFu) && !ZEAPDNeedsOn(0x100), "failed / impossible codec answer -> never write");
+    CHECK(ZEAPDOnValue(0x00) == 0x02 && ZEAPDOnValue(0x01) == 0x03 && ZEAPDOnValue(0x04) == 0x06 && ZEAPDOnValue(0xF8) == 0x02, "amp-on value keeps BTL/L-R swap, nothing else");
+    CHECK(ZLinkVerdict(YES, YES, YES) == 0 && ZLinkVerdict(NO, YES, YES) == 0 && ZLinkVerdict(NO, NO, YES) == 0, "internet answers -> link fine");
+    CHECK(ZLinkVerdict(YES, YES, NO) == 1, "router answers, internet not -> provider problem, Wi-Fi left alone");
+    CHECK(ZLinkVerdict(NO, YES, NO) == 2, "router silent and internet silent -> Wi-Fi passes no traffic");
+    CHECK(ZLinkVerdict(NO, NO, NO) == 2, "router never pings, internet silent -> no traffic");
+    CHECK(!ZShouldReconnect(2, 1000, 0, 0, 500) && ZShouldReconnect(3, 1000, 0, 0, 500), "reconnect only after 3 dead probes (~30 s)");
+    CHECK(!ZShouldReconnect(5, 1000, 0, 0, 30), "no reconnect in the first 60 s after wake/login");
+    CHECK(!ZShouldReconnect(5, 1000, 900, 1, 500) && ZShouldReconnect(5, 1100, 900, 1, 500), "at most once per 3 min");
+    CHECK(!ZShouldReconnect(5, 9000, 5000, 3, 500), "at most 3 reconnects per hour");
     printf("%s (%d failure%s)\n", fails ? "SELFTEST FAILED" : "SELFTEST OK", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }
@@ -1593,6 +1814,16 @@ int main(int argc, const char *argv[]) {
         }
         gLogName = @"cli";
         if ([a1 isEqualToString:@"selftest"]) return SelfTest();
+        if ([a1 isEqualToString:@"wifiprobe"]) {           // v8.21: one link-health probe, printed
+            CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
+            NSString *ifn = i.interfaceName ?: @"en0", *g = ZRouterOf(ifn);
+            double r1 = g ? ZPingMs(g, 1.5) : -2, r2 = g ? ZPingMs(g, 1.5) : -2;
+            BOOL n1 = ZTcpReach("1.1.1.1", 443, 2.5), n2 = ZTcpReach("8.8.8.8", 443, 2.5), d = ZDNSWorks(3.0);
+            printf("Wi-Fi: %s\nrouter %s: ping %.0f ms / %.0f ms (-1 = no answer)\ninternet 1.1.1.1:443 %s, 8.8.8.8:443 %s\nDNS %s\nverdict %d (0 fine, 1 internet down beyond router, 2 no traffic)\n",
+                   ZLinkDesc(i).UTF8String, g.UTF8String ?: "(none)", r1, r2, n1 ? "ok" : "NO", n2 ? "ok" : "NO", d ? "ok" : "NO",
+                   ZLinkVerdict(r1 >= 0 || r2 >= 0, r1 >= 0 || r2 >= 0, n1 || n2));
+            return 0;
+        }
         if ([a1 isEqualToString:@"status"]) { PrintStatus(); return 0; }
         if ([a1 isEqualToString:@"wifi"]) { printf("%s\n", ZLinkDesc(CWWiFiClient.sharedWiFiClient.interface).UTF8String); return 0; }
         if ([a1 isEqualToString:@"up"] || [a1 isEqualToString:@"down"]) { Post(a1); return 0; }
@@ -1666,7 +1897,7 @@ int main(int argc, const char *argv[]) {
             }
         }
         fprintf(stderr, "usage: ZenBookHelper [--brightness|--numberpad|--wifi] | up | down | set <5-100> | status | wifi |\n"
-                        "       mode <none|overlay|gamma|auto> | native <on|off> | hud <on|off> | twofinger <left|right> | numpad <on|off|toggle|probe|ledtest> | powerbutton <sleep|off> | audio | selftest\n");
+                        "       mode <none|overlay|gamma|auto> | native <on|off> | hud <on|off> | twofinger <left|right> | numpad <on|off|toggle|probe|ledtest> | powerbutton <sleep|off> | audio | wifiprobe | selftest\n");
         return 2;
     }
 }

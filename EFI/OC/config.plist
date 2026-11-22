@@ -611,7 +611,7 @@
 				<key>Comment</key>
 				<string>DebugEnhancer.kext</string>
 				<key>Enabled</key>
-				<true/>
+				<false/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/DebugEnhancer</string>
 				<key>MaxKernel</key>
@@ -935,7 +935,7 @@
 				<key>Comment</key>
 				<string>AirportItlwm.kext</string>
 				<key>Enabled</key>
-				<true/>
+				<false/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/AirportItlwm</string>
 				<key>MaxKernel</key>
@@ -1007,7 +1007,7 @@
 				<key>Comment</key>
 				<string>Intel Wi-Fi 6 AX201 via itlwm (works with SecureBootModel Disabled)</string>
 				<key>Enabled</key>
-				<false/>
+				<true/>
 				<key>ExecutablePath</key>
 				<string>Contents/MacOS/itlwm</string>
 				<key>MaxKernel</key>
@@ -2034,7 +2034,7 @@
 				AAAAAAAAAAAAAAAAAAA=
 				</data>
 				<key>boot-args</key>
-				<string>keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -novpanic alcid=66 -dbgenhdbg -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=US -allow3d -wex-tgl-edp-lanes -wex-tgl-edp-timing -wex-tgl-edp-bl -btlfxallowanyaddr -wex-tgl-edp-bl-zero</string>
+				<string>keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -novpanic alcid=66 -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=US -allow3d -wex-tgl-edp-lanes -wex-tgl-edp-timing -wex-tgl-edp-bl -btlfxallowanyaddr -wex-tgl-edp-bl-zero</string>
 				<key>csr-active-config</key>
 				<data>
 				AwgAAA==

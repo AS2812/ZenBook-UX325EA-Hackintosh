@@ -21,6 +21,8 @@
 #import <IOKit/hid/IOHIDKeys.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <IOKit/graphics/IOGraphicsLib.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
+#import <IOKit/IOMessage.h>
 #import <CoreWLAN/CoreWLAN.h>
 #import <CoreAudio/CoreAudio.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -39,7 +41,7 @@
 #include <math.h>
 #include <objc/message.h>
 
-#define ZB_VERSION "8.21"
+#define ZB_VERSION "8.24"
 static NSString *const kSuite   = @"com.zenbook.helper.settings";
 static NSString *const kCmdNote = @"com.zenbook.helper.cmd";
 static const float kMinLevel  = 0.10f;   // never go fully black on the OLED
@@ -136,6 +138,12 @@ static int ZLinkVerdict(BOOL gwOK, BOOL gwEverOK, BOOL netOK) {
 // joining), at most once per 3 min and 3 times per hour.
 static BOOL ZShouldReconnect(int deadStreak, double now, double lastFix, int fixesLastHour, double sinceEvent) {
     return deadStreak >= 3 && sinceEvent > 60 && (lastFix <= 0 || now - lastFix > 180) && fixesLastHour < 3;
+}
+// v8.22: Wi-Fi not even joined after a wake/drop -> off/on at 40 s, 2 min and 4 min (8.14-8.21:
+// once, after 90 s). Never while joined/joining - that is handled by the IP wait.
+static BOOL ZNoLinkCycleDue(double elapsed, int cycles) {
+    static const double at[3] = { 40, 120, 240 };
+    return cycles >= 0 && cycles < 3 && elapsed > at[cycles];
 }
 
 typedef struct { int maxX, maxY; } ZAxisMax;
@@ -1575,34 +1583,105 @@ static NSString *ZRouterOf(NSString *ifname) {
     struct in_addr x; return (s.length && inet_pton(AF_INET, s.UTF8String, &x) == 1) ? s : nil;
 }
 
+// v8.23: itlwm (Ethernet-style Intel Wi-Fi driver, joined by HeliPort) has no CoreWLAN interface
+static NSString *ZItlwmIf(void) {
+    io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("itlwm"));
+    if (!s) return nil;
+    CFTypeRef bsd = IORegistryEntrySearchCFProperty(s, kIOServicePlane, CFSTR("BSD Name"), kCFAllocatorDefault, kIORegistryIterateRecursively);
+    IOObjectRelease(s);
+    NSString *n = bsd ? [(__bridge NSString *)bsd copy] : @"";
+    if (bsd) CFRelease(bsd);
+    return n;
+}
+
 @interface ZWiFi : NSObject
 @end
 @implementation ZWiFi { double _lastGood, _lastToggle, _eventAt; NSString *_lastDesc; int _cycles; BOOL _wasUp; int _assocState; int _powerState; BOOL _firstCheck; double _noIfLog;
     // v8.21 link health
     dispatch_queue_t _probeQ; BOOL _probing, _gwEverOK; NSString *_gw, *_gwForIP; int _tick, _deadStreak, _dnsStreak, _lastVerdict;
     double _lastFix, _lastSummary; NSMutableArray *_fixTimes;
-    int _pN, _pGwOK, _pNetOK, _pDnsBad; double _pRtt; long _rssiSum, _rssiMin, _noise; double _rate; long _ch; }
+    int _pN, _pGwOK, _pNetOK, _pDnsBad; double _pRtt; long _rssiSum, _rssiMin, _noise; double _rate; long _ch;
+    // v8.22 sleep hook
+    io_connect_t _pmRoot; IONotificationPortRef _pmPort; io_object_t _pmNote; BOOL _offForSleep, _sleeping; int _sleepLogs;
+    BOOL _itlwmMode; NSString *_itlIf; int _itlTick, _itlLast; BOOL _itlProbing; int _wakeSeq; }
 - (void)start {
     ZLog(@"Wi-Fi watchdog v%s start (link health check every 10 s)", ZB_VERSION);
     CrashLoopGuard(@"wifiStarts");
     _eventAt = CFAbsoluteTimeGetCurrent(); _lastSummary = _eventAt; _fixTimes = [NSMutableArray new];
     for (NSString *n in @[NSWorkspaceDidWakeNotification, NSWorkspaceScreensDidWakeNotification])
         [NSWorkspace.sharedWorkspace.notificationCenter addObserverForName:n object:nil queue:nil usingBlock:^(NSNotification *note) {
-            double t = CFAbsoluteTimeGetCurrent(); if (t - self->_eventAt > 5) ZLog(@"wake - watching Wi-Fi reconnection");
+            double t = CFAbsoluteTimeGetCurrent();
+            if (t - self->_eventAt > 5) {
+                ZLog(@"wake - watching Wi-Fi reconnection");
+                int seq = ++self->_wakeSeq;                   // v8.24: verdicts 1, 2 and 3 min after every wake
+                for (int k = 1; k <= 3; k++)
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * k * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (seq == self->_wakeSeq) [self wakeVerdict:60 * k];
+                    });
+            }
             self->_eventAt = t; self->_cycles = 0; }];
     [NSTimer scheduledTimerWithTimeInterval:5.0 target:self selector:@selector(check) userInfo:nil repeats:YES];
+    [self installSleepHook];
     [self check];
+}
+// v8.22: AirportItlwm's own suspend/resume is what loses Wi-Fi after a lid sleep (and every sleep
+// waits 30 s for wifip2pd). Like the usual sleepwatcher fix: Wi-Fi off right before the system
+// sleeps, on again right after it wakes - a clean restart, the same as clicking Wi-Fi off/on.
+// Only a Wi-Fi that was on is switched back on. Off switch: defaults write com.zenbook.helper wifiSleepOff -bool NO
+static void ZWiFiPowerCB(void *refcon, io_service_t service, natural_t type, void *arg) {
+    [(__bridge ZWiFi *)refcon power:type arg:arg];
+}
+- (BOOL)sleepOffEnabled { return ![Defs() objectForKey:@"wifiSleepOff"] || [Defs() boolForKey:@"wifiSleepOff"]; }
+- (void)installSleepHook {
+    _pmRoot = IORegisterForSystemPower((__bridge void *)self, &_pmPort, ZWiFiPowerCB, &_pmNote);
+    if (!_pmRoot) { ZLog(@"Wi-Fi sleep hook: IORegisterForSystemPower failed - Wi-Fi stays on during sleep"); return; }
+    CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(_pmPort), kCFRunLoopCommonModes);
+    ZLog(@"Wi-Fi sleep hook ready (Wi-Fi off before sleep, on after wake: %@)", [self sleepOffEnabled] ? @"on" : @"switched off");
+}
+- (void)wifiOnAfterSleep:(NSString *)why {
+    if (!_offForSleep) return;
+    _offForSleep = NO;
+    CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
+    NSError *e = nil; BOOL ok = i && [i setPower:YES error:&e];
+    _eventAt = CFAbsoluteTimeGetCurrent(); _cycles = 0;
+    if (_sleepLogs < 60) ZLog(@"%@: Wi-Fi switched back on %@", why, ok ? @"(ok)" : (e.localizedDescription ?: @"(FAILED - no interface)"));
+}
+- (void)power:(natural_t)type arg:(void *)arg {
+    if (type == kIOMessageCanSystemSleep) { IOAllowPowerChange(_pmRoot, (long)arg); return; }
+    if (type == kIOMessageSystemWillNotSleep) {             // sleep cancelled
+        _sleeping = NO; [self wifiOnAfterSleep:@"sleep cancelled"]; return;
+    }
+    if (type == kIOMessageSystemWillSleep) {
+        _sleeping = YES;
+        CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
+        if ([self sleepOffEnabled] && i.powerOn) {
+            NSError *e = nil; BOOL ok = [i setPower:NO error:&e];
+            _offForSleep = ok;
+            if (_sleepLogs++ < 60) ZLog(@"sleep: Wi-Fi switched off before sleep %@", ok ? @"(ok)" : (e.localizedDescription ?: @"(failed)"));
+        }
+        IOAllowPowerChange(_pmRoot, (long)arg);
+        return;
+    }
+    if (type == kIOMessageSystemHasPoweredOn) {
+        _sleeping = NO;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [self wifiOnAfterSleep:@"wake"]; });
+    }
 }
 - (void)check {
     CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
     double now = CFAbsoluteTimeGetCurrent();
     if (!i) {                                                // v8.16: make a dead Wi-Fi visible
+        NSString *itl = ZItlwmIf();
+        if (itl) { [self itlwmTick:itl now:now]; return; }   // v8.23: itlwm + HeliPort
         if (now - _noIfLog > 60) { _noIfLog = now; ZLog(@"no Wi-Fi interface - the Wi-Fi driver (AirportItlwm) did not start"); }
         [Defs() setObject:@"no Wi-Fi interface" forKey:@"wifiStatus"];
         return;
     }
     // v8.16 (v10.3 test: Wi-Fi dead for a whole session, nothing logged): log power changes and
     // switch Wi-Fi on once if it is off when the helper starts (login) - this laptop should be online.
+    // v8.22 safety net - v8.23: never between "will sleep" and the wake (8.22 switched Wi-Fi back on
+    // 1.7 s after switching it off, before the laptop had actually gone to sleep)
+    if (_offForSleep && !_sleeping && !i.powerOn) [self wifiOnAfterSleep:@"wake (timer)"];
     int power = i.powerOn ? 1 : 0;
     if (!_firstCheck) {
         _firstCheck = YES; _powerState = power;
@@ -1639,15 +1718,58 @@ static NSString *ZRouterOf(NSString *ifname) {
     if (assoc) return;
     double since = MAX(_lastGood, _eventAt);
     BOOL recent = (now - _lastGood < 900) || (now - _eventAt < 600);
-    if (recent && now - since > 90 && _cycles < 1) {
+    if (recent && ZNoLinkCycleDue(now - since, _cycles) && now - _lastToggle > 30) {
         _lastToggle = now; _cycles++;
-        ZLog(@"Wi-Fi has no IP for %.0f s after %@ - power-cycling Wi-Fi once", now - since, now - _eventAt < 300 ? @"wake/login" : @"a drop");
+        ZLog(@"Wi-Fi not joined %.0f s after %@ - power-cycling Wi-Fi (%d of 3)", now - since, now - _eventAt < 300 ? @"wake/login" : @"a drop", _cycles);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             NSError *e1 = nil, *e2 = nil;
             [i setPower:NO error:&e1]; sleep(2); [i setPower:YES error:&e2];
             ZLog(@"Wi-Fi power cycle done%@", (e1 || e2) ? [NSString stringWithFormat:@" (errors: %@ %@)", e1.localizedDescription ?: @"", e2.localizedDescription ?: @""] : @"");
         });
     }
+}
+// v8.24: one clear line per wake and minute - "after wake +60 s: Wi-Fi working / NOT working (...)"
+- (void)wakeVerdict:(int)secs {
+    CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
+    NSString *ifn = i.interfaceName ?: ZItlwmIf() ?: @"en0";
+    long rssi = i ? i.rssiValue : 0; double rate = i ? i.transmitRate : 0; BOOL power = i ? i.powerOn : YES;
+    if (!_probeQ) _probeQ = dispatch_queue_create("zenbook.wifihealth", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(_probeQ, ^{
+        NSString *ip = ZIPv4(ifn), *g = ip ? ZRouterOf(ifn) : nil;
+        double rtt = g ? ZPingMs(g, 1.5) : -2; if (rtt < 0 && g) rtt = ZPingMs(g, 1.5);
+        BOOL net = ip && (ZTcpReach("1.1.1.1", 443, 2.5) || ZTcpReach("8.8.8.8", 443, 2.5));
+        BOOL good = ip && net;
+        ZLog(@"after wake +%d s: Wi-Fi %@ (%@, IP %@, router %@, internet %@, signal %ld dBm, link %.0f Mbps)", secs,
+             good ? @"working" : @"NOT working", power ? @"power on" : @"POWER OFF", ip ?: @"none",
+             rtt >= 0 ? [NSString stringWithFormat:@"%.0f ms", rtt] : @"silent", net ? @"ok" : @"no", rssi, rate);
+    });
+}
+// v8.23 itlwm mode: HeliPort joins and re-joins; the helper only watches and logs (once a minute).
+- (void)itlwmTick:(NSString *)ifn now:(double)now {
+    if (!_itlwmMode || ![ifn isEqualToString:_itlIf ?: @""]) {
+        _itlwmMode = YES; _itlIf = ifn; _itlLast = -1;
+        ZLog(@"Wi-Fi driver: itlwm on %@ - HeliPort joins the network; the watchdog only checks the connection", ifn.length ? ifn : @"(no interface yet)");
+    }
+    [Defs() setObject:[NSString stringWithFormat:@"itlwm %@ IP %@", ifn, (ifn.length ? ZIPv4(ifn) : nil) ?: @"none"] forKey:@"wifiStatus"];
+    if ((_itlTick++ % 12) || _itlProbing || !ifn.length) return;
+    NSString *ip = ZIPv4(ifn);
+    if (!ip) { if (_itlLast != 3) { _itlLast = 3; ZLog(@"itlwm %@: no IP address (HeliPort not joined yet / out of range)", ifn); } return; }
+    _itlProbing = YES;
+    if (!_probeQ) _probeQ = dispatch_queue_create("zenbook.wifihealth", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(_probeQ, ^{
+        NSString *g = ZRouterOf(ifn);
+        double rtt = g ? ZPingMs(g, 1.5) : -2; if (rtt < 0 && g) rtt = ZPingMs(g, 1.5);
+        BOOL net = ZTcpReach("1.1.1.1", 443, 2.5) || ZTcpReach("8.8.8.8", 443, 2.5);
+        int v = ZLinkVerdict(rtt >= 0, rtt >= 0, net);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_itlProbing = NO;
+            if (v != self->_itlLast) {
+                self->_itlLast = v;
+                ZLog(@"itlwm %@ %@: router %@, internet %@", ifn, v == 0 ? @"working" : v == 1 ? @"internet down beyond the router" : @"NO TRAFFIC",
+                     rtt >= 0 ? [NSString stringWithFormat:@"%.0f ms", rtt] : @"silent", net ? @"ok" : @"no");
+            }
+        });
+    });
 }
 // v8.21: every 10 s while Wi-Fi has an IP: does the router answer, does the internet answer?
 // Off switch (no sudo): defaults write com.zenbook.helper wifiHealthCheck -bool NO
@@ -1780,6 +1902,9 @@ static int SelfTest(void) {
     CHECK(!ZShouldReconnect(5, 1000, 0, 0, 30), "no reconnect in the first 60 s after wake/login");
     CHECK(!ZShouldReconnect(5, 1000, 900, 1, 500) && ZShouldReconnect(5, 1100, 900, 1, 500), "at most once per 3 min");
     CHECK(!ZShouldReconnect(5, 9000, 5000, 3, 500), "at most 3 reconnects per hour");
+    CHECK(!ZNoLinkCycleDue(39, 0) && ZNoLinkCycleDue(41, 0), "not joined: first off/on after 40 s");
+    CHECK(!ZNoLinkCycleDue(119, 1) && ZNoLinkCycleDue(121, 1) && ZNoLinkCycleDue(241, 2), "then at 2 min and 4 min");
+    CHECK(!ZNoLinkCycleDue(10000, 3), "at most 3 off/on per wake or drop");
     printf("%s (%d failure%s)\n", fails ? "SELFTEST FAILED" : "SELFTEST OK", fails, fails == 1 ? "" : "s");
     return fails ? 1 : 0;
 }
@@ -1816,7 +1941,9 @@ int main(int argc, const char *argv[]) {
         if ([a1 isEqualToString:@"selftest"]) return SelfTest();
         if ([a1 isEqualToString:@"wifiprobe"]) {           // v8.21: one link-health probe, printed
             CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
-            NSString *ifn = i.interfaceName ?: @"en0", *g = ZRouterOf(ifn);
+            NSString *itl = i ? nil : ZItlwmIf();
+            NSString *ifn = i.interfaceName ?: (itl.length ? itl : @"en0"), *g = ZRouterOf(ifn);
+            if (itl) printf("driver: itlwm (HeliPort) on %s, IP %s\n", ifn.UTF8String, (ZIPv4(ifn) ?: @"none").UTF8String);
             double r1 = g ? ZPingMs(g, 1.5) : -2, r2 = g ? ZPingMs(g, 1.5) : -2;
             BOOL n1 = ZTcpReach("1.1.1.1", 443, 2.5), n2 = ZTcpReach("8.8.8.8", 443, 2.5), d = ZDNSWorks(3.0);
             printf("Wi-Fi: %s\nrouter %s: ping %.0f ms / %.0f ms (-1 = no answer)\ninternet 1.1.1.1:443 %s, 8.8.8.8:443 %s\nDNS %s\nverdict %d (0 fine, 1 internet down beyond router, 2 no traffic)\n",

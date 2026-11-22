@@ -1,6 +1,53 @@
 ZenBook UX325EA Hackintosh - v10.10 (2026-11-21)
 =================================================
 
+Wi-Fi on macOS — HeliPort and itlwm (2026-11-22)
+
+The USB now boots the Intel AX201 with itlwm 2.3.0. To keep this setup on
+the internal SSD, sign in to macOS, open Install ZenBook Wi-Fi.pkg on this
+USB in Finder, and finish Installer. Eject the USB and restart from the SSD.
+HeliPort opens at login. Pick your network, save the password and enable
+Auto Join. Use the HeliPort icon for Wi-Fi. The Apple Wi-Fi menu and
+Wi-Fi-based Location Services are unavailable with this driver.
+
+After you close and reopen the lid, the laptop records five minutes of local
+router checks. Open ~/Library/Logs/ZenBook Wi-Fi/Last Wake.txt in Finder.
+
+
+Previous setup (2026-11-21 21:05): Wi-Fi stayed on AirportItlwm (macOS Wi-Fi menu + location by Wi-Fi).
+  Its build is the correct one (= official AirportItlwm 2.3.0 "Sonoma 14.4+", checked byte for byte).
+  Run once:   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"   -> Enter -> lid 1 minute -> hands off
+  It installs helper 8.24 (Wi-Fi really OFF during sleep, ON after wake - 8.22 had a bug) and records
+  what macOS's Wi-Fi/location/Bluetooth services did if Wi-Fi drops again. 8.24 also writes
+  "after wake +60/120/180 s: Wi-Fi working / NOT working" after EVERY lid open, by itself.
+  fix-wifi v1.3 keeps its log on the SSD (/Users/Shared/UX325EA-Logs) and copies it here.
+  AirDrop: impossible with ANY Intel Wi-Fi card (needs Apple's AWDL = a Broadcom card).
+
+Earlier manual driver-switch instructions (2026-11-21)
+  Not applied: with itlwm, Location Services by Wi-Fi stops working and the macOS Wi-Fi menu is
+  replaced by HeliPort. (AirDrop works with NEITHER Intel driver - it needs a Broadcom card.)
+  The lid check (fix-wifi v1.1) showed the real problem: AirportItlwm loses the router 10-95 s
+  after joining - with or without the lid - and then sometimes refuses every scan. itlwm is the
+  same Intel driver without Apple's Wi-Fi stack; HeliPort (menu-bar icon) joins and re-joins.
+      sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" itlwm
+  Then restart, click the HeliPort icon (top right), choose your network, type the password
+  once. Back to the old driver: ... wifi-driver.sh airport    Show: ... wifi-driver.sh status
+  It switches the SSD's and this USB's OpenCore, installs HeliPort 1.5.0 and helper 8.23
+  (8.22 bug fixed: it switched Wi-Fi back on 1.7 s after "off before sleep").
+
+WI-FI AFTER THE LID - ONE COMMAND (fix-wifi.sh, 2026-11-21)
+  Cause: on battery macOS put the laptop to sleep ~2 minutes after the lid was opened (display
+  off after 2 min, sleep right after) - every sleep switches the Wi-Fi card off. Fix, stored on
+  the SSD for good: battery display off 5 min / sleep 30 min, charger never sleeps by itself
+  (closing the lid still sleeps), plus the Wi-Fi helper with auto-reconnect.
+      sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
+  v1.1 (helper 8.22): Wi-Fi is switched OFF right before every sleep and ON right after the
+  wake (a clean restart of the card, like clicking Wi-Fi off/on - the Wi-Fi driver's own
+  sleep handling is what lost the connection). Not joined after a wake -> off/on again at
+  40 s, 2 min, 4 min. The script first saves the Wi-Fi/sleep history of the last failure.
+  Lid check: press Enter, close the lid 1 minute, open it, log in - it starts by itself.
+  Rollback: UX325EA-RESCUE/BACKUPS/pre-wifi822-*/ (helper 8.21, fix-wifi 1.0).
+
 DONE 2026-11-21: macOS only. make-mac-only.sh deleted Windows, macOS has the whole SSD
 (1024 GB) and starts from the power button without this USB (OpenCore on the SSD, no menu).
 Keep this USB as the rescue stick: power on holding Alt, or tap Esc and choose the USB.

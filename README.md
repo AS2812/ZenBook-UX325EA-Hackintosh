@@ -30,7 +30,7 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 | GPU | Intel Iris Xe 0x9A49 (96 EU) | **WhateverXe 0.8.3 + UX325EA patch v4.6**, AMFIAnchor, WhateverXe Graphics 0.4.4 | ✅ Metal, 1536 MB, 1920×1080 @ 60 Hz, 30‑bit; clean loading screen at boot and login (v4.6) |
 | Display | Samsung OLED eDP 1.4 (ATNA33XC11), 2 lanes | patched link setup (2 × 2.7 Gbps) | ✅ |
 | Brightness | OLED, Intel DPCD nits interface | patch `-wex-tgl-edp-bl` + **SSDT‑PNLF `_UID` 19** | ✅ real panel brightness, Control Centre slider, Fn+F4/F5, bezel, 0 = black |
-| Wi‑Fi | Intel AX201 | AirportItlwm 2.3.0 (native Wi‑Fi menu) + helper watchdog with **link-health check** (helper 8.21) | ✅ reconnects about 5 s after a lid wake (v10.8 test). 8.21 also repairs "connected but nothing loads" stalls by itself (test pending) |
+| Wi‑Fi | Intel AX201 | **itlwm 2.3.0 + [HeliPort](https://github.com/OpenIntelWireless/HeliPort/releases) 1.5.0** (menu-bar app) — default since 2026‑11‑22; `wifi-driver.sh airport` switches back to AirportItlwm | ✅ itlwm. AirportItlwm (Apple Wi‑Fi menu + Wi‑Fi location) lost the router 10–95 s after joining on this laptop, with or without the lid, and sometimes refused all scans afterwards. AirDrop: not possible with any Intel card |
 | Bluetooth | Intel AX201 | IntelBluetoothFirmware 2.4.0 + BlueToolFixup, NVRAM fix, `-btlfxallowanyaddr`, USB map | ✅ (cold boot after Windows) |
 | Audio | Realtek ALC294 | AppleALC 1.9.8, **`alcid=66`** (layout 11 wiring + speaker amp re-enabled at every wake); helper enforces mute | ✅ speakers, headphones, mute; speakers after lid wake ✅ (v10.8 test); right after a fresh start: helper 8.20 switches the speaker amplifier on (test pending) |
 | Microphone (built‑in) | digital mic on Intel's audio DSP | — | ❌ not possible on macOS (use headset jack / Bluetooth / USB mic) |
@@ -48,6 +48,11 @@ See [docs/OLED-BRIGHTNESS-KEYS-SLEEP.md](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md).
 **Not possible on macOS:** built‑in microphone (Intel DSP), Windows Hello IR face login,
 Thunderbolt 4 hot‑plug of PCIe devices (docks / eGPU).
 **Not tested:** external HDMI / USB‑C monitors.
+
+Performance (measured 2026‑11‑22 with the daily profile, on the charger): CPU 5–20 % busy with
+peaks of 40 %, memory pressure normal, no swap, thermal nominal, CPU speed limit 100 %. The daily
+profiles no longer load DebugEnhancer and drop `-dbgenhdbg` (less kernel logging). YouTube VP9/AV1
+is decoded by the CPU (this GPU has no macOS hardware path for them); H.264/HEVC are hardware.
 
 Software: OpenCore **1.0.8**, macOS **Sonoma 14.8.9 (23J631)** — WhateverXe 0.8.3 needs
 exactly this build, so **turn off automatic macOS updates**. `SecureBootModel=Disabled`,
@@ -72,8 +77,13 @@ usb-kit/                     tools for the USB's data partition
   fix-hardware.sh            apply fixes, --test (guided test + report), --audit, --diagnose, --gpu-*
   sync-efi-to-ssd.sh         copy the EFI to the internal SSD (boot without USB), Windows-safe
   make-mac-only.sh           optional: delete Windows, macOS gets the whole SSD, no USB needed
+  wifi-driver.sh             itlwm + HeliPort  <->  AirportItlwm, on the SSD's and the USB's EFI
+  fix-wifi.sh                sleep settings (no 2-minute idle sleep on battery), helper update,
+                             automatic lid check; logs to /Users/Shared/UX325EA-Logs
+  zenbook-status.sh          read-only report: driver on the SSD, debug flags, helper, Wi-Fi, CPU/RAM
   ZenBookHelper.app          power button, mute, NumberPad, wake brightness, speaker amp, Delete key,
-                             Wi-Fi watchdog + link-health check (`ZenBookHelper wifiprobe`)
+                             Wi-Fi watchdog + link-health check (`ZenBookHelper wifiprobe`), Wi-Fi off
+                             during sleep (AirportItlwm), "after wake +60/120/180 s" Wi-Fi checks
   Check FPS After Restart.app    one-time Finder setup for the next desktop login
   UX325EA-RESCUE/GPU/gpu-guard.sh   one-boot GPU test guard with automatic rollback
   README.txt                 end-user guide and full change log
@@ -121,6 +131,14 @@ docs/                        root-cause write-ups
    FileVault stays on), copies OpenCore to the SSD with the menu off and removes Windows Boot
    Manager. It refuses (and changes nothing) if a Windows partition lies *before* macOS, because
    APFS can only grow forwards. Tested on the UX325EA: 341.5 GB → 1024 GB.
+
+9. Wi-Fi: download **HeliPort** from its [releases](https://github.com/OpenIntelWireless/HeliPort/releases)
+   into `usb-kit/` (not included: third-party app), then
+   ```sh
+   sudo sh "/Volumes/<USB>/wifi-driver.sh" itlwm     # or: airport
+   sudo sh "/Volumes/<USB>/fix-wifi.sh"              # sleep settings + lid check
+   ```
+   Restart, choose your network in HeliPort once (it re-joins by itself).
 
 Rollback at any time: `fix-hardware.sh --gpu-off`, or double-click `GPU-OFF.command` from
 another Mac.

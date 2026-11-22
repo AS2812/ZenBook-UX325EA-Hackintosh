@@ -1,0 +1,59 @@
+# Changelog
+
+All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
+full, step-by-step log of every test).
+
+## v10.11 — 2026-11-22 · Wi-Fi on itlwm, lid-wake hardening, less logging
+
+- **Wi-Fi:** the daily setup now uses **itlwm 2.3.0 + HeliPort 1.5.0**. AirportItlwm lost the
+  router 10–95 s after joining on this laptop (with or without the lid) and sometimes refused
+  every scan afterwards. `wifi-driver.sh` switches between the two on the SSD's and the USB's EFI.
+- itlwm's built-in sample networks removed (one was an open network called "Redmi").
+- **Performance:** daily profiles no longer load DebugEnhancer and drop `-dbgenhdbg`.
+- `fix-wifi.sh` 1.3 — no idle sleep 2 minutes after opening the lid (battery 5/30 min, charger
+  never), automatic lid check, log kept on the SSD.
+- ZenBookHelper 8.22–8.24 — Wi-Fi off during sleep / on after wake, retries at 40 s · 2 min ·
+  4 min, itlwm awareness, `after wake +60/120/180 s` Wi-Fi verdicts.
+- `zenbook-status.sh` — read-only report of what the laptop actually runs.
+
+## v10.10 — 2026-11-21 · macOS only, Wi-Fi link health
+
+- `make-mac-only.sh` — deletes Windows and grows macOS over the whole SSD (341.5 GB → 1024 GB),
+  OpenCore on the SSD with the menu off. Refuses if Windows sits before macOS.
+- ZenBookHelper 8.21 — link-health check every 10 s (router, internet, DNS); reconnects a stalled
+  link by itself; `wifiprobe` command.
+- ZenBookHelper 8.20 — switches the ALC294 speaker amplifier on after a fresh start.
+
+## v10.8 — 2026-11-20 · speakers after the lid, Delete key
+
+- AppleALC **layout 66** (same wiring as 11, plus amplifier re-enable at every wake).
+- Delete key next to the power button = Move to Trash in Finder.
+- Leaked identifiers removed from the repository history.
+
+## v10.7 — 2026-11-20 · clean loading screen
+
+- Driver v4.6 converts the 8-bit boot console image to the 30-bit framebuffer — no more
+  coloured pixels at boot and login. Fn-lock restored after a lid wake.
+
+## v10.5 – v10.6 — 2026-11-20 · hotkeys after a lid wake
+
+- Root cause: AsusSMC passed 8-byte WMI arguments to a 20-byte buffer, so the ATK hotkey device
+  never initialised. `SSDT-WAKE` pads them; the EC lid sensor is polled after every wake.
+- Driver v4.4 switches the panel off before power-off — a black shut-down screen.
+
+## v10.0 — 2026-11-20 · ready to make permanent
+
+- Lid wake fix, final profiles, `sync-efi-to-ssd.sh` v2 (Windows-safe, verified copy).
+
+## v9.x — 2026-11-19 / 20 · real OLED brightness and a Mac-like boot
+
+- **Real OLED brightness** over DPCD nits (v9.6), Control Centre slider, black at 0.
+- Bluetooth fix (AX201), USB map, power button sleep, two-finger menu, NumberPad.
+- Boots straight into macOS without a menu (v9.3).
+- **GPU acceleration works** (v9.2) — Metal, 1920×1080, 30-bit.
+
+## v8.x — 2026-11-18 / 19 · the Iris Xe black screen
+
+- Six diagnostic boots traced the black OLED to Apple's eDP link setup; the custom WhateverXe
+  build fixes the timing and lane/rate computation.
+  See [docs/IRIS-XE-BLACK-SCREEN-FIX.md](docs/IRIS-XE-BLACK-SCREEN-FIX.md).

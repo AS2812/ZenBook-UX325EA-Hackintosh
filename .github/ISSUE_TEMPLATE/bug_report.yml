@@ -1,0 +1,54 @@
+name: 🐞 Bug report
+description: Something on the UX325EA does not work as described
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please **remove your serial number, MLB, UUID and ROM** from anything you paste.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Graphics / display, Brightness, Hotkeys / keyboard, Trackpad / NumberPad, Wi-Fi, Bluetooth, Audio, Sleep / wake, Boot / OpenCore, Other]
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model and CPU
+      placeholder: UX325EA, i7-1165G7
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version (build)
+      placeholder: 14.8.9 (23J631)
+    validations:
+      required: true
+  - type: dropdown
+    id: profile
+    attributes:
+      label: Boot profile
+      options: [config.plist (daily), config-stable.plist (safe), config-gpu.plist, other]
+    validations:
+      required: true
+  - type: dropdown
+    id: wifi
+    attributes:
+      label: Wi-Fi driver
+      options: [itlwm + HeliPort, AirportItlwm, not sure]
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected
+      placeholder: Steps to reproduce, e.g. "close the lid for 1 minute, open it, Wi-Fi drops after ~80 s"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Status report or logs
+      description: Run `sudo sh "/Volumes/<USB>/zenbook-status.sh"` and paste the report (or the relevant part of `fix-hardware.sh --test`).
+      render: text

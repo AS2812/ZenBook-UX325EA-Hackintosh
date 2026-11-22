@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📖 Dortania OpenCore guide
+    url: https://dortania.github.io/OpenCore-Install-Guide/
+    about: General OpenCore questions that are not specific to the UX325EA

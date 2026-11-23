@@ -6,11 +6,10 @@ typedef enum { Missing, Incompatible, Unready, RadioOff, Searching, Joining, NoS
                LocalUnknown, LocalOK, LocalStall } LinkStatus;
 typedef enum { Wait, Launch, Rejoin, TurnOn, Cycle } RecoveryAction;
 typedef enum { ScanUnknown, ScanEmpty, ScanVisible } ScanState;
-// 2.3: faster recovery - empty list / silent link for 45 s, up to 3 radio restarts per failure
-// two minutes apart (2.2: one restart, then 10 minutes), HeliPort re-asked every two minutes,
-// and a join that hangs for 90 s is restarted too.
-enum { EmptyScanSeconds = 45, StallSeconds = 45, CycleCooldown = 120, MaxCycles = 3,
-       RescanSeconds = 120, SearchSeconds = 60, JoinStuckSeconds = 90 };
+// 2.5: tolerant recovery - relaxed timers to prevent false cycling on router GTK rekeys
+// and idle periods. At most 2 cycles, 120s thresholds, HeliPort left running.
+enum { EmptyScanSeconds = 120, StallSeconds = 120, CycleCooldown = 180, MaxCycles = 2,
+       RescanSeconds = 180, SearchSeconds = 90, JoinStuckSeconds = 120 };
 typedef struct {
     LinkStatus last;
     double since, epoch, nextAction, nextCycle, nextScan;

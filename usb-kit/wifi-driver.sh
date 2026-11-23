@@ -171,11 +171,24 @@ if [ "$MODE" != status ] && [ "$TEST" = 0 ] && [ -n "$VU" ] && [ "$VI" != "$VU" 
     UIDU="$(id -u "$U")"
     for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do launchctl bootout "gui/$UIDU/$L" 2>/dev/null; done
     rm -rf "$HI"; /bin/cp -R "$HU" "$HI"; xattr -dr com.apple.quarantine "$HI" 2>/dev/null; chown -R "$U":staff "$HI"
-    for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
-        [ -f "$UH/Library/LaunchAgents/$L.plist" ] && launchctl bootstrap "gui/$UIDU" "$UH/Library/LaunchAgents/$L.plist" 2>/dev/null
-    done
+    if [ "$MODE" = itlwm ]; then
+        rm -f "$UH/Library/LaunchAgents/com.zenbook.wifi.plist"
+        for L in com.zenbook.brightness com.zenbook.numberpad; do
+            [ -f "$UH/Library/LaunchAgents/$L.plist" ] && launchctl bootstrap "gui/$UIDU" "$UH/Library/LaunchAgents/$L.plist" 2>/dev/null
+        done
+    else
+        for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
+            [ -f "$UH/Library/LaunchAgents/$L.plist" ] && launchctl bootstrap "gui/$UIDU" "$UH/Library/LaunchAgents/$L.plist" 2>/dev/null
+        done
+    fi
     ok "ZenBookHelper updated ${VI:-none} -> $VU (permissions kept)"
-elif [ "$MODE" != status ]; then ok "ZenBookHelper ${VI:-?} (USB has ${VU:-?})"; fi
+elif [ "$MODE" != status ]; then
+    if [ "$MODE" = itlwm ]; then
+        UIDU="$(id -u "$U")"
+        launchctl bootout "gui/$UIDU/com.zenbook.wifi" 2>/dev/null || true
+        rm -f "$UH/Library/LaunchAgents/com.zenbook.wifi.plist"
+    fi
+    ok "ZenBookHelper ${VI:-?} (USB has ${VU:-?})"; fi
 sync
 echo ""
 case "$MODE" in

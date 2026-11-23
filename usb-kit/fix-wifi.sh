@@ -112,7 +112,10 @@ exec > >(tee -a "$LOG") 2>&1
 U="${SUDO_USER:-$(stat -f %Su /dev/console)}"; UID_U="$(id -u "$U")"
 UH="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"; [ -n "$UH" ] || UH="$(eval echo "~$U")"
 HI="$UH/Applications/ZenBookHelper.app"; HU="$SCRIPT_DIR/ZenBookHelper.app"; HB="$HI/Contents/MacOS/ZenBookHelper"
-AGENTS="com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi"
+AGENTS="com.zenbook.brightness com.zenbook.numberpad"
+# Ensure legacy AirportItlwm watchdog (com.zenbook.wifi) is disabled under itlwm
+run launchctl bootout "gui/$UID_U/com.zenbook.wifi" 2>/dev/null || true
+run rm -f "$UH/Library/LaunchAgents/com.zenbook.wifi.plist"
 ok()   { echo "  [OK]   $*"; }
 bad()  { echo "  [FAIL] $*"; FAILS=$((FAILS + 1)); }
 note() { echo "  [..]   $*"; }
@@ -194,8 +197,8 @@ if [ "$UPDATED" = 1 ] && [ -n "$ITF" ] && [ "$(itl_running)" != 2.3.1 ] && [ "$D
     note "the improved Wi-Fi driver (itlwm 2.3.1 UX325) is on the SSD now - it starts after Shut Down + power on"
     RESTART=1
 fi
-case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" -novht "*|*" -noht40 "*)
-    note "speed-limit switches -novht/-noht40 are active in this start (the package removed them from the EFI)"; RESTART=1 ;; esac
+case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" -novht "*)
+    note "speed-limit switch -novht is active in this start"; RESTART=1 ;; esac
 
 # ---------------------------------------------------------------------------
 # 2. HeliPort "!" - a working network service for the Intel card

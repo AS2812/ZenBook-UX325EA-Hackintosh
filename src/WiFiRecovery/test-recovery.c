@@ -22,10 +22,11 @@ int main(void) {
     assert(decide(&p, Unready, 15, false, false, false) == Wait);
     assert(decide(&p, Searching, 30, false, false, false) == Launch);
     assert(decide(&p, Searching, 60, true, false, false) == Wait);
-    assert(decide(&p, Searching, 90, true, false, false) == Rejoin);
-    assert(decide(&p, Searching, 105, false, false, false) == Launch);
-    assert(decide(&p, Searching, 150, true, false, false) == Wait);     // HeliPort re-asked only every 2 min
-    assert(decide(&p, Searching, 210, true, false, false) == Rejoin);
+    assert(decide(&p, Searching, 90, true, false, false) == Wait);
+    assert(decide(&p, Searching, 120, true, false, false) == Rejoin);
+    assert(decide(&p, Searching, 135, false, false, false) == Launch);
+    assert(decide(&p, Searching, 200, true, false, false) == Wait);
+    assert(decide(&p, Searching, 310, true, false, false) == Rejoin);
     assert(decide(&p, Searching, 800, true, false, false) == Rejoin);
     startWindow(&p, 50000);
     assert(decide(&p, RadioOff, 50005, true, true, false) == TurnOn);
@@ -35,20 +36,20 @@ int main(void) {
     assert(decide(&p, RadioOff, 60015, true, false, true) == TurnOn);
     for (int i = 0; i < 60; i++) assert(decide(&p, LocalUnknown, 60100+i*15, true, true, false) == Wait);
     assert(decide(&p, LocalStall, 62000, true, true, false) == Wait);
-    assert(decide(&p, LocalStall, 62045, true, true, false) == Cycle);
-    assert(decide(&p, LocalStall, 62110, true, true, false) == Wait);    // cooldown
-    assert(decide(&p, LocalOK, 62125, true, true, false) == Wait);       // recovered: counter reset
-    assert(decide(&p, LocalStall, 62140, true, true, false) == Wait);
-    assert(decide(&p, LocalStall, 62170, true, true, false) == Wait);    // silent only 30 s
-    assert(decide(&p, LocalStall, 62200, true, true, false) == Cycle);   // new failure, cooldown over
+    assert(decide(&p, LocalStall, 62120, true, true, false) == Cycle);
+    assert(decide(&p, LocalStall, 62150, true, true, false) == Wait);    // cooldown
+    assert(decide(&p, LocalOK, 62165, true, true, false) == Wait);       // recovered: counter reset
+    assert(decide(&p, LocalStall, 62180, true, true, false) == Wait);
+    assert(decide(&p, LocalStall, 62240, true, true, false) == Wait);    // silent only 60 s
+    assert(decide(&p, LocalStall, 62310, true, true, false) == Cycle);   // new failure, cooldown over
     assert(decide(&p, Incompatible, 63000, true, true, true) == Wait);
     assert(decide(&p, NoService, 63005, true, true, true) == Wait);
     assert(decide(&p, Joining, 63010, true, true, false) == Wait);
     assert(decide(&p, Joining, 63060, true, true, false) == Wait);
-    assert(decide(&p, Joining, 63100, true, true, false) == Rejoin);     // join hanging for 90 s
-    assert(decide(&p, NoAddress, 63115, true, true, false) == Wait);
+    assert(decide(&p, Joining, 63130, true, true, false) == Rejoin);     // join hanging for 120 s
+    assert(decide(&p, NoAddress, 63145, true, true, false) == Wait);
     int at[8] = {0};
-    assert(emptyListReplay(ScanEmpty, true, at) == 3 && at[0] == 465 && at[1] == 585 && at[2] == 705);
+    assert(emptyListReplay(ScanEmpty, true, at) == 2 && at[0] == 540 && at[1] == 720);
     assert(emptyListReplay(ScanVisible, true, NULL) == 0);
     assert(emptyListReplay(ScanUnknown, true, NULL) == 0);
     assert(emptyListReplay(ScanEmpty, false, NULL) == 0);

@@ -278,7 +278,7 @@ if [ "$MODE" = "usbtest" ]; then
     if [ -d "$HU" ] && [ "$VI" != "$VU" ]; then
         for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do launchctl bootout "gui/$TARGET_UID/$L" 2>/dev/null; done
         rm -rf "$HI"; /bin/cp -R "$HU" "$HI"; xattr -dr com.apple.quarantine "$HI" 2>/dev/null; own "$HI"
-        for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
+        for L in com.zenbook.brightness com.zenbook.numberpad; do
             [ -f "$LAUNCH_DIR/$L.plist" ] && launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_DIR/$L.plist" 2>/dev/null
         done
         ok "ZenBookHelper updated ${VI:-?} -> $VU (permissions kept) - waiting 5 s for it to start"; sleep 5
@@ -510,7 +510,7 @@ if [ "$MODE" = "gpu-test" ] || [ "$MODE" = "gpu-keep" ] || [ "$MODE" = "gpu-off"
         if [ -d "$HU" ] && [ "$VI" != "$VU" ]; then
             for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do launchctl bootout "gui/$TARGET_UID/$L" 2>/dev/null; done
             rm -rf "$HI"; /bin/cp -R "$HU" "$HI"; xattr -dr com.apple.quarantine "$HI" 2>/dev/null; own "$HI"
-            for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
+            for L in com.zenbook.brightness com.zenbook.numberpad; do
                 [ -f "$LAUNCH_DIR/$L.plist" ] && launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_DIR/$L.plist" 2>/dev/null
             done
             ok "ZenBookHelper updated ${VI:-?} -> $VU (permissions kept)"
@@ -787,15 +787,16 @@ if [ -d "$SCRIPT_DIR/ZenBookHelper.app" ]; then
     as_user defaults delete com.zenbook.helper.settings wifiStarts 2>/dev/null
     write_agent com.zenbook.brightness --brightness
     write_agent com.zenbook.numberpad  --numberpad
-    write_agent com.zenbook.wifi       --wifi
+    # Under itlwm, HeliPort and WakeCheck manage Wi-Fi. Do not run legacy CoreWLAN watchdog.
+    launchctl bootout "gui/$TARGET_UID/com.zenbook.wifi" 2>/dev/null || true
+    rm -f "$LAUNCH_DIR/com.zenbook.wifi.plist"
     own "$H_APP" "$USER_HOME/bin" "$USER_HOME/.zshrc" "$USER_HOME/.bash_profile"
-    for L in com.zenbook.brightness com.zenbook.numberpad com.zenbook.wifi; do
+    for L in com.zenbook.brightness com.zenbook.numberpad; do
         launchctl bootstrap "gui/$TARGET_UID" "$LAUNCH_DIR/$L.plist" 2>/dev/null || info "$L starts at next login."
     done
     sleep 2
     pgrep -f "ZenBookHelper --brightness" >/dev/null && ok "Brightness daemon running" || warn "Brightness daemon not running (see ~/Library/Logs/ZenBookHelper.log)"
     pgrep -f "ZenBookHelper --numberpad"  >/dev/null && ok "NumberPad daemon running"  || warn "NumberPad daemon not running (see ~/Library/Logs/ZenBookHelper.log)"
-    pgrep -f "ZenBookHelper --wifi"       >/dev/null && ok "Wi-Fi watchdog running"    || warn "Wi-Fi watchdog not running (see ~/Library/Logs/ZenBookHelper.log)"
     echo ""
     # v8.5: older builds were signed by file hash, so every update silently lost these
     # permissions (helper log: touchpad 0xE00002E2, accessibility = 0). The app is now signed

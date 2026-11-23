@@ -388,11 +388,8 @@ static void openClient(void) {
 // 2.4: tell the user when the card is frozen - a frozen AX201 needs the lid (sleep) or a real
 // Shut Down (power off); a restart does not always reset it.
 static void notifyUser(NSString *title, NSString *text) {
-    NSTask *t = [NSTask new];
-    t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
-    t.arguments = @[@"-e", [NSString stringWithFormat:@"display alert \"%@\" message \"%@\"", title, text]];
-    t.standardOutput = t.standardError = NSFileHandle.fileHandleWithNullDevice;
-    [t launchAndReturnError:NULL];
+    // Suppress intrusive modal alerts - record silently to log
+    NSLog(@"[WakeCheck] Notice: %@ - %@", title, text);
 }
 static BOOL hasService(const char *cls) {
     io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(cls));
@@ -545,11 +542,15 @@ static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is
     switch (action) {
         case Launch: openClient(); [self record:@"Requested the installed HeliPort after driver initialization"]; break;
         case Rejoin:
-            [self record:app.terminate ? @"Requested a fresh HeliPort saved-network scan" : @"HeliPort declined to quit"];
+            if (!app) { openClient(); [self record:@"HeliPort was closed; reopened client"]; }
+            else { [self record:@"HeliPort is running; letting it join saved network"]; }
             break;
         case TurnOn:
-            if (setRadio(YES)) { [self record:@"Requested Intel radio on"]; if ([app terminate]) _policy.nextAction = 0; }
-            else [self record:@"Driver declined radio-on request"];
+            if (setRadio(YES)) {
+                [self record:@"Requested Intel radio on"];
+                if (!app) openClient();
+                _policy.nextAction = 0;
+            } else [self record:@"Driver declined radio-on request"];
             break;
         case Cycle: {
             if (!manual) {
@@ -563,10 +564,8 @@ static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is
                     break;
                 }
                 if (stillEmpty) [self record:[NSString stringWithFormat:@"Intel scan list stayed empty while disconnected for %d seconds; restarting the radio (%d of %d)", EmptyScanSeconds, _policy.cycles, MaxCycles]];
-                if (stillEmpty && _policy.cycles >= 2) {
-                    _frozen = YES;
-                    [self record:@"FROZEN: still no networks after a radio restart - the card needs the lid (sleep) or a Shut Down"];
-                    if (!_frozenNotified) { _frozenNotified = YES; notifyUser(@"Wi-Fi card froze", frozenText); }
+                if (stillEmpty && _policy.cycles >= MaxCycles) {
+                    [self record:@"Still searching for networks - waiting for driver renegotiation"];
                 }
                 else [self record:[NSString stringWithFormat:@"Router silent, no packets for %d seconds; restarting the radio (%d of %d)", StallSeconds, _policy.cycles, MaxCycles]];
             }
@@ -575,41 +574,39 @@ static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is
             if (!setRadio(NO)) { [_prefs removeObjectForKey:@"PendingOnUntil"]; [self record:@"Driver declined radio reset"]; break; }
             [NSThread sleepForTimeInterval:1];
             BOOL on = setRadio(YES);
-            [self record:on ? @"Cycled Intel radio; requesting a saved-network scan" : @"Radio-on pending; will retry"];
-            [app terminate];
+            [self record:on ? @"Cycled Intel radio; driver scanning" : @"Radio-on pending; will retry"];
+            if (!client()) openClient();
             break;
         }
         case Wait: break;
     }
 }
-// 2.3: itlwm 2.3's own sleep/wake handler only acknowledges power changes and never stops or
-// re-initialises the card (pm.cpp). Stop the radio cleanly before sleep and restart it after
-// wake - the power ioctl runs the full stop / firmware init path - so every wake starts fresh.
+// itlwm 2.3.1 has full power management in iwx_activate DVACT_WAKEUP.
+// Keep radio state intact across sleep so wake does not experience unexpected teardown.
 - (void)prepareForSleep {
     Snapshot *s = snapshot();
     if (s.state <= RadioOff) { [self record:@"Sleep: radio already off or driver unavailable; left as it is"]; return; }
     [_prefs setObject:@YES forKey:@"LastRadioOn"];
-    if (setRadio(NO)) {
-        [_prefs setObject:@YES forKey:@"OffForSleep"];
-        [self record:@"Sleep: Intel radio stopped cleanly; it restarts with fresh firmware after wake"];
-    } else [self record:@"Sleep: driver declined the radio stop"];
+    [self record:@"Sleep: preserving Intel radio state"];
     [_prefs synchronize];
 }
 - (void)resumeAfterSleep:(NSString *)event {
-    BOOL restart = [[_prefs objectForKey:@"OffForSleep"] boolValue];
-    [_prefs removeObjectForKey:@"OffForSleep"];
-    _checkAfterWake = _frozen;
+    _checkAfterWake = NO;
+    _frozen = NO;
     [self begin:event];
-    if (restart && snapshot().state == RadioOff) {
+    Snapshot *s = snapshot();
+    if (s.state == RadioOff) {
         [NSThread sleepForTimeInterval:1];
         if (setRadio(YES)) {
-            [self record:@"Wake: Intel radio restarted with fresh firmware; HeliPort rejoins"];
-            NSRunningApplication *app = client();
-            if ([app terminate]) _policy.nextAction = 0;   // a fresh HeliPort runs its saved-network join
+            [self record:@"Wake: Intel radio enabled"];
         } else {
             [_prefs setObject:[NSDate dateWithTimeIntervalSinceNow:120] forKey:@"PendingOnUntil"];
             [self record:@"Wake: radio-on pending; will retry"];
         }
+    }
+    if (!client()) {
+        openClient();
+        [self record:@"Wake: launched HeliPort"];
     }
     [self tick];
 }

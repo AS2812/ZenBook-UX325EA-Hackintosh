@@ -42,20 +42,30 @@ func patchProfile(_ data: Data) throws -> Data {
     add[to]["MaxKernel"] = ""
     kernel["Add"] = add
     config["Kernel"] = kernel
-    // These two upstream itlwm troubleshooting switches disable 802.11ac or
-    // 40 MHz HT. Older SSD configurations may still carry them.
+    // Ensure critical boot-args for Tiger Lake Wi-Fi and sleep stability:
+    // darkwake=0 (no background wake desync), -noht40 (clean 20 MHz 2.4 GHz channel), itlwm_cc=EG
     let apple = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
     if var nvram = config["NVRAM"] as? Plist, var entries = nvram["Add"] as? Plist,
        var vars = entries[apple] as? Plist, let args = vars["boot-args"] as? String {
-        let words = args.split(whereSeparator: { $0.isWhitespace })
-        let filtered = words.filter { $0 != "-novht" && $0 != "-noht40" }
-        if words.count != filtered.count {
-            vars["boot-args"] = filtered.joined(separator: " ")
-            entries[apple] = vars
-            nvram["Add"] = entries
-            config["NVRAM"] = nvram
-        }
+        var words = args.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        if !words.contains("darkwake=0") { words.append("darkwake=0") }
+        if !words.contains("-noht40") { words.append("-noht40") }
+        words = words.map { $0 == "itlwm_cc=US" ? "itlwm_cc=EG" : $0 }
+        if !words.contains(where: { $0.hasPrefix("itlwm_cc=") }) { words.append("itlwm_cc=EG") }
+        vars["boot-args"] = words.joined(separator: " ")
+        entries[apple] = vars
+        nvram["Add"] = entries
+        config["NVRAM"] = nvram
     }
+    // Disable PCIe ASPM on Intel AX201 CNVi to prevent power-state freezes
+    let pciRoute = "PciRoot(0x0)/Pci(0x14,0x3)"
+    var devProps = (config["DeviceProperties"] as? Plist) ?? Plist()
+    var devAdd = (devProps["Add"] as? Plist) ?? Plist()
+    var wifiProps = (devAdd[pciRoute] as? Plist) ?? Plist()
+    wifiProps["pci-aspm-default"] = Data([0x00])
+    devAdd[pciRoute] = wifiProps
+    devProps["Add"] = devAdd
+    config["DeviceProperties"] = devProps
     if NSDictionary(dictionary: config).isEqual(to: try plist(data)) { return data }
     return try xml(config)
 }

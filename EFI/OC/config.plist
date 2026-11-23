@@ -494,7 +494,9 @@
 				AQ==
 				</data>
 				<key>pci-aspm-default</key>
-				<integer>0</integer>
+				<data>
+				AA==
+				</data>
 			</dict>
 			<key>PciRoot(0x0)/Pci(0x1F,0x3)</key>
 			<dict>
@@ -2036,7 +2038,7 @@
 				AAAAAAAAAAAAAAAAAAA=
 				</data>
 				<key>boot-args</key>
-				<string>keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -novpanic alcid=66 -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=US -allow3d -wex-tgl-edp-lanes -wex-tgl-edp-timing -wex-tgl-edp-bl -btlfxallowanyaddr -wex-tgl-edp-bl-zero</string>
+				<string>keepsyms=1 debug=0x100 -disablegfxfirmware -igfxdvmt -novpanic alcid=66 -vi2c-force-polling npci=0x2000 alcverbs=1 igfxonln=1 revcpu=1 revcpuname="11th Gen Intel Core i7-1165G7 @ 2.80GHz" itlwm_cc=EG -allow3d -wex-tgl-edp-lanes -wex-tgl-edp-timing -wex-tgl-edp-bl -btlfxallowanyaddr -wex-tgl-edp-bl-zero darkwake=0 -noht40</string>
 				<key>csr-active-config</key>
 				<data>
 				AwgAAA==
@@ -2114,14 +2116,14 @@
 			<key>AdviseFeatures</key>
 			<true/>
 			<key>MLB</key>
-			<string>M0000000000000001</string>
+			<string>C02021802CDP8PGJC</string>
 			<key>MaxBIOSVersion</key>
 			<false/>
 			<key>ProcessorType</key>
 			<integer>0</integer>
 			<key>ROM</key>
 			<data>
-			AAAAAAAA
+			ElLMixY1
 			</data>
 			<key>SpoofVendor</key>
 			<true/>
@@ -2130,9 +2132,9 @@
 			<key>SystemProductName</key>
 			<string>MacBookPro16,2</string>
 			<key>SystemSerialNumber</key>
-			<string>W00000000001</string>
+			<string>C02CRS08ML7H</string>
 			<key>SystemUUID</key>
-			<string>00000000-0000-0000-0000-000000000000</string>
+			<string>A8BE70C3-47B0-465B-84BC-EBCEBBA008D0</string>
 		</dict>
 		<key>UpdateDataHub</key>
 		<true/>

@@ -1639,6 +1639,7 @@ static void ZWiFiPowerCB(void *refcon, io_service_t service, natural_t type, voi
     ZLog(@"Wi-Fi sleep hook ready (Wi-Fi off before sleep, on after wake: %@)", [self sleepOffEnabled] ? @"on" : @"switched off");
 }
 - (void)wifiOnAfterSleep:(NSString *)why {
+    if (ZItlwmIf()) return;
     if (!_offForSleep) return;
     _offForSleep = NO;
     CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
@@ -1647,6 +1648,11 @@ static void ZWiFiPowerCB(void *refcon, io_service_t service, natural_t type, voi
     if (_sleepLogs < 60) ZLog(@"%@: Wi-Fi switched back on %@", why, ok ? @"(ok)" : (e.localizedDescription ?: @"(FAILED - no interface)"));
 }
 - (void)power:(natural_t)type arg:(void *)arg {
+    if (ZItlwmIf()) {
+        if (type == kIOMessageCanSystemSleep || type == kIOMessageSystemWillSleep)
+            IOAllowPowerChange(_pmRoot, (long)arg);
+        return;
+    }
     if (type == kIOMessageCanSystemSleep) { IOAllowPowerChange(_pmRoot, (long)arg); return; }
     if (type == kIOMessageSystemWillNotSleep) {             // sleep cancelled
         _sleeping = NO; [self wifiOnAfterSleep:@"sleep cancelled"]; return;
@@ -1668,11 +1674,11 @@ static void ZWiFiPowerCB(void *refcon, io_service_t service, natural_t type, voi
     }
 }
 - (void)check {
-    CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
     double now = CFAbsoluteTimeGetCurrent();
+    NSString *itl = ZItlwmIf();
+    if (itl) { [self itlwmTick:itl now:now]; return; }
+    CWInterface *i = CWWiFiClient.sharedWiFiClient.interface;
     if (!i) {                                                // v8.16: make a dead Wi-Fi visible
-        NSString *itl = ZItlwmIf();
-        if (itl) { [self itlwmTick:itl now:now]; return; }   // v8.23: itlwm + HeliPort
         if (now - _noIfLog > 60) { _noIfLog = now; ZLog(@"no Wi-Fi interface - the Wi-Fi driver (AirportItlwm) did not start"); }
         [Defs() setObject:@"no Wi-Fi interface" forKey:@"wifiStatus"];
         return;

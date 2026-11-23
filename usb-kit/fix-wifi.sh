@@ -113,14 +113,14 @@ U="${SUDO_USER:-$(stat -f %Su /dev/console)}"; UID_U="$(id -u "$U")"
 UH="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"; [ -n "$UH" ] || UH="$(eval echo "~$U")"
 HI="$UH/Applications/ZenBookHelper.app"; HU="$SCRIPT_DIR/ZenBookHelper.app"; HB="$HI/Contents/MacOS/ZenBookHelper"
 AGENTS="com.zenbook.brightness com.zenbook.numberpad"
-# Ensure legacy AirportItlwm watchdog (com.zenbook.wifi) is disabled under itlwm
-run launchctl bootout "gui/$UID_U/com.zenbook.wifi" 2>/dev/null || true
-run rm -f "$UH/Library/LaunchAgents/com.zenbook.wifi.plist"
 ok()   { echo "  [OK]   $*"; }
 bad()  { echo "  [FAIL] $*"; FAILS=$((FAILS + 1)); }
 note() { echo "  [..]   $*"; }
 run()  { if [ "$DRY" = 1 ]; then echo "  (dry) $*"; else "$@"; fi; }
 as_u() { if [ "$(id -u)" -eq 0 ]; then launchctl asuser "$UID_U" sudo -u "$U" -H "$@"; else "$@"; fi; }
+# Ensure legacy AirportItlwm watchdog (com.zenbook.wifi) is disabled under itlwm
+run launchctl bootout "gui/$UID_U/com.zenbook.wifi" 2>/dev/null || true
+run rm -f "$UH/Library/LaunchAgents/com.zenbook.wifi.plist"
 FAILS=0; RESTART=0
 echo "=== ZenBook UX325EA - Wi-Fi fix v$VERSION ($TS) user $U $( [ "$DRY" = 1 ] && echo '(DRY RUN)')"
 if [ "$(uname -m)" != x86_64 ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ]; then

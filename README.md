@@ -66,8 +66,8 @@ button moves files to the Trash, like on Windows.
 
 ### 📶 Wi-Fi that survives sleep
 The Intel AX201 runs on **itlwm + HeliPort**. No idle sleep two minutes after opening the lid,
-a watchdog that checks the router and the internet every 10 s, and a Wi-Fi verdict 1, 2 and
-3 minutes after every wake.
+a recovery agent that restarts the radio if the network list stays empty after a wake, and a
+one-click speed test that shows the band, channel and signal.
 <br>→ [The Wi-Fi investigation](docs/WIFI.md)
 
 </td>
@@ -192,6 +192,7 @@ Everything in [`usb-kit/`](usb-kit) runs from the USB's data partition.
 | `wifi-driver.sh` | switches **itlwm + HeliPort** ⇄ **AirportItlwm** on the SSD's and the USB's EFI, with backups |
 | `fix-wifi.sh` | sleep settings (no idle sleep 2 min after the lid), helper update, automatic lid check |
 | `zenbook-status.sh` | read-only report: Wi-Fi driver and debug flags on the SSD, helper, Wi-Fi, CPU and memory |
+| `Install ZenBook Wi-Fi.pkg` | itlwm + HeliPort, Wi-Fi recovery agent and **ZenBook Wi-Fi Repair** (speed test, report, reconnect) — source in `src/WiFiRecovery` |
 | `ZenBookHelper.app` | power button, mute, NumberPad, speaker amplifier, Delete key, Wi-Fi watchdog (`wifiprobe`) |
 | `GPU-OFF.command` | emergency rollback to the safe graphics profile from another Mac |
 
@@ -240,6 +241,8 @@ System Settings → General → Startup Disk → macOS → Restart.
 Run `sudo sh "/Volumes/<USB>/fix-wifi.sh"` once: it stops the battery idle sleep that switched
 Wi-Fi off two minutes after the lid was opened, updates the helper and runs a hands-off lid
 check. Every wake is then logged as `after wake +60/120/180 s: Wi-Fi working / NOT working`.
+With itlwm, the Wi-Fi installer's recovery agent restarts the radio if the network list stays
+empty for a minute; **ZenBook Wi-Fi Repair → Show Report** saves the wake history.
 Details in [docs/WIFI.md](docs/WIFI.md).
 
 </details>
@@ -268,7 +271,7 @@ debug flags, CPU, memory, Wi-Fi) to the USB, ready to attach to an issue.
 
 - [**Iris Xe black screen**](docs/IRIS-XE-BLACK-SCREEN-FIX.md) — why Apple's Tiger Lake framebuffer left the OLED dark, and the eDP fix
 - [**OLED brightness, keys and sleep**](docs/OLED-BRIGHTNESS-KEYS-SLEEP.md) — DPCD nits, ASUS ATK hotkeys and the embedded controller after wake
-- [**Wi-Fi after sleep**](docs/WIFI.md) — idle sleep, AirportItlwm drops, the watchdog and the move to itlwm
+- [**Wi-Fi after sleep**](docs/WIFI.md) — idle sleep, AirportItlwm drops, the move to itlwm, the recovery agent and speed test
 - [**Changelog**](CHANGELOG.md) — every version, what changed and why
 
 ## 💻 Software

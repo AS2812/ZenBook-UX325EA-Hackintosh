@@ -3,6 +3,17 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.12 — 2026-11-23 · Wi-Fi recovery 2.1 and a speed test
+
+- **Empty network list after the lid:** when Wi-Fi worked before, the radio is on and itlwm's
+  network list stays empty for a minute, the recovery agent restarts the radio once (re-checked
+  right before; then only after a recovered link or new wake, 10-minute cooldown).
+- **ZenBook Wi-Fi Repair → Test Speed** — download / upload over the Intel interface with band,
+  channel, width and signal; **Try 5 GHz** when the same network is strong on 5 GHz.
+- The Wi-Fi installer removes `-novht` / `-noht40` from all OpenCore profiles and validates each.
+- **Show Report → Save a Copy** — wake history and the latest speed test in one file.
+- New source folder [`src/WiFiRecovery`](src/WiFiRecovery) with policy tests.
+
 ## v10.11 — 2026-11-22 · Wi-Fi on itlwm, lid-wake hardening, less logging
 
 - **Wi-Fi:** the daily setup now uses **itlwm 2.3.0 + HeliPort 1.5.0**. AirportItlwm lost the

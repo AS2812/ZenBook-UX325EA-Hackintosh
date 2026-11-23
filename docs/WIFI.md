@@ -43,7 +43,7 @@ requests never reach it, and the HeliPort menu-bar app joins and re-joins the ne
 |---|---|---|
 | Wi-Fi menu | Apple's | HeliPort icon |
 | Wi-Fi-based location | ✅ | ❌ |
-| Stability on this laptop | drops 10–95 s after joining | daily driver |
+| Stability on this laptop | drops 10–95 s after joining | daily driver + recovery agent |
 | AirDrop / AWDL | ❌ | ❌ (no Intel card can do it) |
 
 Switch at any time — both directions edit the SSD's and the USB's EFI, with backups:
@@ -51,6 +51,36 @@ Switch at any time — both directions edit the SSD's and the USB's EFI, with ba
 ```sh
 sudo sh "/Volumes/<USB>/wifi-driver.sh" itlwm      # or: airport · status
 ```
+
+## 4. Recovery agent and speed test (Wi-Fi 2.1)
+
+With itlwm, macOS no longer manages the card, so a small login agent watches it through the
+public itlwm / HeliPort API (no extra kernel code):
+
+| Situation after a wake | What the agent does |
+|---|---|
+| Driver ready, HeliPort closed | opens HeliPort once the interface exists |
+| Radio on, still searching after 60 s | asks HeliPort for a fresh saved-network scan |
+| Worked before, radio on, **driver's network list empty for 60 s** | restarts the Intel radio **once**, after re-checking right before |
+| Router known to answer goes silent, no packets, no TCP reply for 45 s | restarts the radio once |
+| Radio switched off by you | leaves it off |
+| Joined, DHCP service waiting for an address | a root job asks macOS to retry DHCP |
+
+Another automatic restart needs a recovered link or a new wake **and** a 10-minute cooldown, so
+it can never loop. Visible networks or a failed list read never trigger a restart.
+
+**ZenBook Wi-Fi Repair → Test Speed** runs Apple's `networkQuality` on the Intel interface and
+reports download, upload, band, channel, width and signal. On 2.4 GHz it offers **Try 5 GHz**
+when the same network (same name and security) is visible on 5 GHz at a strong signal; the driver
+then picks the band. The installer also removes the itlwm troubleshooting switches `-novht` and
+`-noht40` from every OpenCore profile, because they switch off 802.11ac and 40 MHz channels.
+
+> [!NOTE]
+> 2.1 passed simulated wake, empty-list, stall and recovery replays. Real-world throughput and
+> long-sleep behaviour still need a run on the laptop: test speed, close the lid for 10 minutes,
+> use Wi-Fi for 10 minutes, test again, then **Show Report → Save a Copy**.
+
+Source, policy tests and the profile updater: [src/WiFiRecovery](../src/WiFiRecovery).
 
 ## Checking it yourself
 

@@ -1,4 +1,4 @@
-ZenBook UX325EA Hackintosh - v10.14 (2026-11-23)
+ZenBook UX325EA Hackintosh - v10.15 (2026-11-23)
 =================================================
 
 WHY WI-FI IS SLOW / LOST AFTER A MINUTE (found 2026-11-23 from the laptop's own log)
@@ -16,7 +16,28 @@ WHY WI-FI IS SLOW / LOST AFTER A MINUTE (found 2026-11-23 from the laptop's own 
   AirportItlwm per its docs). The new "Wi-Fi 6" test drivers online are experimental (AX210
   only, not this AX201) - not used.
 
-WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.1 + Wi-Fi package 2.2, 2026-11-23)
+WI-FI: FIX EVERYTHING + RECORDER - ONE COMMAND (fix-wifi.sh v2.2 + Wi-Fi package 2.3, 2026-11-23)
+
+  WHAT THE LAPTOP LOG SHOWED (15:12 run, 2026-11-23): woke 12:45:03, Wi-Fi fine until 12:51:49,
+  then at 12:53:48 (+9 min) the driver heard ZERO networks; a full radio restart at 12:54:49 did
+  not help - only a restart did. Speed test: download 1.9 Mbps, upload 29.6 Mbps (receiving broken).
+  TEST PLAN (the recorder shows screen + Bluetooth on every line):
+    a) run fix-wifi.sh once (installs 2.3, then the recorder starts). Close/open the lid, then
+       leave the laptop untouched for 10+ minutes (screen goes dark) and come back.
+    b) same again with Bluetooth OFF (Control Centre). If Wi-Fi never dies then -> Bluetooth.
+    Press Enter to stop the recorder each time, then bring the USB back.
+
+  New in package 2.3 (for "Wi-Fi dies 5-7 minutes after the lid"):
+  - The itlwm driver never restarts the card itself around sleep. The recovery agent now stops
+    the Intel radio cleanly right before sleep and restarts it with fresh firmware after every
+    wake (HeliPort then rejoins by itself, ~10-20 s).
+  - Faster rescue: empty network list or silent router for 45 s -> radio restart, up to 3 per
+    problem, 2 minutes apart (2.2: one, then 10 minutes). HeliPort re-asked every 2 minutes,
+    a join that hangs for 90 s is restarted.
+  - RECORDER (wifi-log.sh): one line every 5 s + every outage with its time since the wake,
+    until you press Enter. fix-wifi.sh starts it by itself at the end. Alone:
+        sudo sh "/Volumes/Install macOS Sonoma/wifi-log.sh"
+    Log: UX325EA-RESCUE/TEST-RESULTS/wifi-log-<time>.txt - bring the USB back after.
 
   Sign in to macOS, plug in this USB, open Terminal and type:
 
@@ -24,7 +45,7 @@ WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.1 + Wi-Fi package 2.2, 2026-
 
   It installs/updates the Wi-Fi package, fixes HeliPort's "!" and hides the macOS Wi-Fi
   icon, checks HeliPort's auto-join list (point 1 above), runs a speed test with the signal,
-  sets the sleep timers, then offers a lid check. If it says RESTART NEEDED: restart from
+  sets the sleep timers, then starts the recorder (press Enter to stop it). If it says RESTART NEEDED: restart from
   the SSD and run it once more. Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt
 
   The two "!" icons:

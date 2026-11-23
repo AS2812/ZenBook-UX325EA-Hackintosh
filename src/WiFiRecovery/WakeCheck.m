@@ -2,6 +2,8 @@
 // The separate root invocation only retries IP configuration for a joined DHCP service.
 #import <Cocoa/Cocoa.h>
 #import <IOKit/IOKitLib.h>
+#import <IOKit/IOMessage.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <arpa/inet.h>
@@ -319,6 +321,29 @@ static BOOL canTry5GHz(Snapshot *s) {
         if (strongAlternative(current, &rows[i])) return YES;
     return NO;
 }
+static unsigned scanCount(int *best) {   // networks in the driver's cache and the strongest signal
+    io_connect_t c = adapter();
+    unsigned n = 0; *best = 0;
+    if (!c) return 0;
+    struct ioctl_network_info row;
+    while (n < 256) {
+        memset(&row, 0, sizeof(row));
+        if (!readMethod(c, IOCTL_80211_SCAN_RESULT, &row, sizeof(row))) break;
+        if (!*best || row.rssi > *best) *best = row.rssi;
+        n++;
+    }
+    IOServiceClose(c);
+    return n;
+}
+static NSString *describe(LinkStatus state);
+static NSString *linkLine(void) {
+    Snapshot *s = snapshot();
+    int best = 0; unsigned n = s.state >= Searching ? scanCount(&best) : 0;
+    NSMutableString *line = [describe(s.state) mutableCopy];
+    if (s.channel) [line appendFormat:@" | %@", linkDetails(s)];
+    if (s.state >= Searching) [line appendFormat:@" | driver list: %u networks%@", n, n ? [NSString stringWithFormat:@", strongest %d dBm", best] : @""];
+    return line;
+}
 static NSString *describe(LinkStatus state) {
     switch (state) {
         case Missing: return @"Intel itlwm driver missing from this boot";
@@ -348,6 +373,8 @@ static void openClient(void) {
 @interface Monitor : NSObject
 - (void)begin:(NSString *)event;
 - (void)tick;
+- (void)prepareForSleep;
+- (void)resumeAfterSleep:(NSString *)event;
 @end
 @implementation Monitor {
     RecoveryPolicy _policy;
@@ -476,10 +503,11 @@ static void openClient(void) {
                     [s.router isEqual:latest.router] && latest.received == s.received;
                 if (![s.iface isEqual:latest.iface] || (!stillEmpty && !stillStalled)) {
                     [self record:@"Link changed during the probe; skipped radio reset"];
-                    _policy.cycled = false;
+                    _policy.cycles--; _policy.nextCycle = 0;
                     break;
                 }
-                if (stillEmpty) [self record:@"Intel scan list stayed empty while disconnected for at least 60 seconds; restarting the radio"];
+                if (stillEmpty) [self record:[NSString stringWithFormat:@"Intel scan list stayed empty while disconnected for %d seconds; restarting the radio (%d of %d)", EmptyScanSeconds, _policy.cycles, MaxCycles]];
+                else [self record:[NSString stringWithFormat:@"Router silent, no packets for %d seconds; restarting the radio (%d of %d)", StallSeconds, _policy.cycles, MaxCycles]];
             }
             [_prefs setObject:[NSDate dateWithTimeIntervalSinceNow:120] forKey:@"PendingOnUntil"];
             [_prefs synchronize];
@@ -492,6 +520,36 @@ static void openClient(void) {
         }
         case Wait: break;
     }
+}
+// 2.3: itlwm 2.3's own sleep/wake handler only acknowledges power changes and never stops or
+// re-initialises the card (pm.cpp). Stop the radio cleanly before sleep and restart it after
+// wake - the power ioctl runs the full stop / firmware init path - so every wake starts fresh.
+- (void)prepareForSleep {
+    Snapshot *s = snapshot();
+    if (s.state <= RadioOff) { [self record:@"Sleep: radio already off or driver unavailable; left as it is"]; return; }
+    [_prefs setObject:@YES forKey:@"LastRadioOn"];
+    if (setRadio(NO)) {
+        [_prefs setObject:@YES forKey:@"OffForSleep"];
+        [self record:@"Sleep: Intel radio stopped cleanly; it restarts with fresh firmware after wake"];
+    } else [self record:@"Sleep: driver declined the radio stop"];
+    [_prefs synchronize];
+}
+- (void)resumeAfterSleep:(NSString *)event {
+    BOOL restart = [[_prefs objectForKey:@"OffForSleep"] boolValue];
+    [_prefs removeObjectForKey:@"OffForSleep"];
+    [self begin:event];
+    if (restart && snapshot().state == RadioOff) {
+        [NSThread sleepForTimeInterval:1];
+        if (setRadio(YES)) {
+            [self record:@"Wake: Intel radio restarted with fresh firmware; HeliPort rejoins"];
+            NSRunningApplication *app = client();
+            if ([app terminate]) _policy.nextAction = 0;   // a fresh HeliPort runs its saved-network join
+        } else {
+            [_prefs setObject:[NSDate dateWithTimeIntervalSinceNow:120] forKey:@"PendingOnUntil"];
+            [self record:@"Wake: radio-on pending; will retry"];
+        }
+    }
+    [self tick];
 }
 @end
 static NSString *speedLine(NSDictionary *data, NSString *bitsKey, NSString *mbpsKey) {
@@ -604,7 +662,7 @@ static void showReport(void) {
     if ([panel runModal] != NSModalResponseOK) return;
     NSString *speed = [NSString stringWithContentsOfURL:homePath(@"Library/Logs/ZenBook Wi-Fi/Speed Test.txt")
         encoding:NSUTF8StringEncoding error:NULL];
-    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.2\n\n%@\n\n%@",
+    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.3\n\n%@\n\n%@",
         speed ?: @"No speed test recorded.", wake];
     NSError *error = nil;
     if (![report writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:&error])
@@ -640,24 +698,48 @@ static int showRepair(void) {
     }
     return 0;
 }
+static Monitor *monitorRef;
+static dispatch_queue_t monitorQueue;
+static BOOL sleeping;
+static io_connect_t rootPort;
+static void powerChanged(void *refcon, io_service_t service, natural_t type, void *arg) {
+    switch (type) {
+        case kIOMessageCanSystemSleep:
+            IOAllowPowerChange(rootPort, (long)arg); break;
+        case kIOMessageSystemWillSleep:   // runs before the system may sleep (it waits for IOAllowPowerChange)
+            dispatch_sync(monitorQueue, ^{ sleeping = YES; @autoreleasepool { [monitorRef prepareForSleep]; } });
+            IOAllowPowerChange(rootPort, (long)arg); break;
+        case kIOMessageSystemWillNotSleep:
+            dispatch_async(monitorQueue, ^{ sleeping = NO; @autoreleasepool { [monitorRef resumeAfterSleep:@"Sleep cancelled"]; } }); break;
+        case kIOMessageSystemHasPoweredOn:
+            dispatch_async(monitorQueue, ^{ sleeping = NO; @autoreleasepool { [monitorRef resumeAfterSleep:@"System wake"]; } }); break;
+    }
+}
 int main(int argc, const char *argv[]) { @autoreleasepool {
     if (argc == 2 && strcmp(argv[1], "--retry-ip") == 0) return retryDHCP();
     if ([NSBundle.mainBundle.bundleIdentifier isEqualToString:@"local.zenbook.wifi.repair"]) return showRepair();
     if (argc == 2 && strcmp(argv[1], "--status") == 0) { puts(describe(snapshot().state).UTF8String); return 0; }
+    if (argc == 2 && strcmp(argv[1], "--link") == 0) { puts(linkLine().UTF8String); return 0; }
     if (geteuid() == 0) return 1;
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
     Monitor *monitor = [Monitor new];
     dispatch_queue_t q = dispatch_queue_create("local.zenbook.wifi.recovery", DISPATCH_QUEUE_SERIAL);
-    NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
-    __block BOOL sleeping = NO;
-    [center addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        dispatch_async(q, ^{ sleeping = YES; });
-    }];
-    [center addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        dispatch_async(q, ^{ sleeping = NO; [monitor begin:@"System wake"]; [monitor tick]; });
-    }];
-    dispatch_async(q, ^{ [monitor begin:@"Login agent started"]; });
+    monitorRef = monitor; monitorQueue = q;
+    IONotificationPortRef port = NULL; io_object_t notifier = IO_OBJECT_NULL;
+    rootPort = IORegisterForSystemPower(NULL, &port, powerChanged, &notifier);
+    if (rootPort) CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port), kCFRunLoopCommonModes);
+    else {   // fallback (2.2 behaviour): no clean stop before sleep
+        NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
+        [center addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            dispatch_async(q, ^{ sleeping = YES; });
+        }];
+        [center addObserverForName:NSWorkspaceDidWakeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+            dispatch_async(q, ^{ sleeping = NO; [monitor begin:@"System wake"]; [monitor tick]; });
+        }];
+    }
+    // also finishes a restart if the agent itself was restarted between sleep and wake
+    dispatch_async(q, ^{ [monitor resumeAfterSleep:rootPort ? @"Login agent started" : @"Login agent started (no sleep hook)"]; });
     __attribute__((objc_precise_lifetime)) dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC), 15*NSEC_PER_SEC, NSEC_PER_SEC);
     dispatch_source_set_event_handler(timer, ^{ @autoreleasepool { if (!sleeping) [monitor tick]; } });

@@ -3,6 +3,20 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.15 — 2026-11-23 · fresh Wi-Fi firmware after every wake, and a recorder
+
+- **Wi-Fi package 2.3** — itlwm's own sleep/wake handler only acknowledges power changes and never
+  stops or re-initialises the card (`pm.cpp`). The recovery agent now registers for system sleep,
+  stops the radio cleanly before sleep and restarts it after wake — the power ioctl runs the full
+  stop / firmware-init path — so every wake starts with fresh firmware.
+- Faster rescue: empty network list or silent router for 45 s → radio restart, up to 3 per failure,
+  2 minutes apart (was: one, then 10 minutes). HeliPort is re-asked every 2 minutes and a join that
+  hangs for 90 s is restarted. `WakeCheck --link` prints state, band, signal and networks seen.
+- **`wifi-log.sh` 1.1** — records Wi-Fi every 5 s until you press Enter, through any number of lid
+  sleeps: internet, router, DNS, signal, networks seen, screen, Bluetooth, battery, every outage with its time
+  since the wake, plus driver / HeliPort / DHCP messages and a summary. `fix-wifi.sh` 2.2 starts it
+  at the end.
+
 ## v10.14 — 2026-11-23 · why Wi-Fi was slow and dropped after a minute
 
 - **`fix-wifi.sh` 2.1** — lists HeliPort's auto-join order and walks you through fixing it

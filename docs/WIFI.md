@@ -64,10 +64,13 @@ public itlwm / HeliPort API (no extra kernel code):
 | Worked before, radio on, **driver's network list empty for 60 s** | restarts the Intel radio **once**, after re-checking right before |
 | Router known to answer goes silent, no packets, no TCP reply for 45 s | restarts the radio once |
 | Radio switched off by you | leaves it off |
+| **System going to sleep / waking up (2.3)** | stops the radio cleanly before sleep, restarts it with fresh firmware after wake — itlwm's own sleep handler never touches the card |
 | Joined, DHCP service waiting for an address | a root job asks macOS to retry DHCP |
 
-Another automatic restart needs a recovered link or a new wake **and** a 10-minute cooldown, so
-it can never loop. Visible networks or a failed list read never trigger a restart.
+2.3: up to 3 automatic restarts per failure, 2 minutes apart (2.1/2.2: one, then 10 minutes); a
+recovered link resets the count, so it can never loop. Visible networks or a failed list read
+never trigger a restart. Record a whole day with `sudo sh "/Volumes/<USB>/wifi-log.sh"` (Enter
+stops it).
 
 **ZenBook Wi-Fi Repair → Test Speed** runs Apple's `networkQuality` on the Intel interface and
 reports download, upload, band, channel, width and signal. On 2.4 GHz it offers **Try 5 GHz**

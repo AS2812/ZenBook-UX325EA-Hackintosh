@@ -6,10 +6,16 @@ typedef enum { Missing, Incompatible, Unready, RadioOff, Searching, Joining, NoS
                LocalUnknown, LocalOK, LocalStall } LinkStatus;
 typedef enum { Wait, Launch, Rejoin, TurnOn, Cycle } RecoveryAction;
 typedef enum { ScanUnknown, ScanEmpty, ScanVisible } ScanState;
+// 2.3: faster recovery - empty list / silent link for 45 s, up to 3 radio restarts per failure
+// two minutes apart (2.2: one restart, then 10 minutes), HeliPort re-asked every two minutes,
+// and a join that hangs for 90 s is restarted too.
+enum { EmptyScanSeconds = 45, StallSeconds = 45, CycleCooldown = 120, MaxCycles = 3,
+       RescanSeconds = 120, SearchSeconds = 60, JoinStuckSeconds = 90 };
 typedef struct {
     LinkStatus last;
     double since, epoch, nextAction, nextCycle, nextScan;
-    bool relaunched, cycled, restored;
+    bool relaunched, restored;
+    int cycles;
     bool wasJoined, empty;
     double emptySince;
 } RecoveryPolicy;
@@ -36,15 +42,16 @@ static inline RecoveryAction decide(RecoveryPolicy *p, LinkStatus state, double 
     if (!manual && now < p->nextAction) return Wait;
     if (!running) { p->nextAction = now + 30; return Launch; }
     if (state == RadioOff || state == NoService) return Wait;
-    bool scanStuck = state == Searching && p->wasJoined && p->empty && now - p->emptySince >= 60;
-    bool trafficStuck = state == LocalStall && now - p->since >= 45;
-    if (manual || ((scanStuck || trafficStuck) && !p->cycled && now >= p->nextCycle)) {
-        p->cycled = true; p->nextCycle = now + 600; p->nextAction = now + 15;
+    bool scanStuck = state == Searching && p->wasJoined && p->empty && now - p->emptySince >= EmptyScanSeconds;
+    bool trafficStuck = state == LocalStall && now - p->since >= StallSeconds;
+    if (manual || ((scanStuck || trafficStuck) && p->cycles < MaxCycles && now >= p->nextCycle)) {
+        p->cycles++; p->nextCycle = now + CycleCooldown; p->nextAction = now + 15;
         return Cycle;
     }
-    if (state == LocalOK || state == LocalUnknown) { p->relaunched = false; p->cycled = false; }
-    if (state == Searching && (!p->relaunched || now >= p->nextScan) && now - p->since >= 60) {
-        p->relaunched = true; p->nextAction = now + 10; p->nextScan = now + 600;
+    if (state == LocalOK || state == LocalUnknown) { p->relaunched = false; p->cycles = 0; }
+    double patience = state == Joining ? JoinStuckSeconds : SearchSeconds;
+    if ((state == Searching || state == Joining) && (!p->relaunched || now >= p->nextScan) && now - p->since >= patience) {
+        p->relaunched = true; p->nextAction = now + 10; p->nextScan = now + RescanSeconds;
         return Rejoin;
     }
     return Wait;

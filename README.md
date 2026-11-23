@@ -191,6 +191,7 @@ Everything in [`usb-kit/`](usb-kit) runs from the USB's data partition.
 | `make-mac-only.sh` | removes Windows and gives macOS the whole SSD (check mode by default) |
 | `wifi-driver.sh` | switches **itlwm + HeliPort** ⇄ **AirportItlwm** on the SSD's and the USB's EFI, with backups |
 | `fix-wifi.sh` | **one command for Wi-Fi**: installs the Wi-Fi package, gives the Intel card a working network service (clears HeliPort's "!"), hides the unusable macOS Wi-Fi icon, sleep timers, optional lid check |
+| `wifi-log.sh` | Wi-Fi recorder: a line every 5 s and every outage with its time since the wake, through any number of lid sleeps, until you press Enter |
 | `zenbook-status.sh` | read-only report: Wi-Fi driver and debug flags on the SSD, helper, Wi-Fi, CPU and memory |
 | `Install ZenBook Wi-Fi.pkg` | itlwm + HeliPort, Wi-Fi recovery agent and **ZenBook Wi-Fi Repair** (speed test, report, reconnect) — source in `src/WiFiRecovery` |
 | `ZenBookHelper.app` | power button, mute, NumberPad, speaker amplifier, Delete key, Wi-Fi watchdog (`wifiprobe`) |

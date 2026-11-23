@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v2.1
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v2.2
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 #
@@ -15,10 +15,13 @@
 #      ever show a warning. It is hidden from the menu bar - HeliPort is the Wi-Fi menu.
 #      (wifi-driver.sh airport brings it back.)
 #   4. Power: no idle sleep 2 minutes after opening the lid (battery 5/30 min, charger never).
-#   5. ZenBookHelper from this USB, optional lid check.
+#   5. ZenBookHelper from this USB, then the Wi-Fi recorder (wifi-log.sh) until you press Enter.
 #   v2.1: HeliPort auto-join order (HeliPort joins the FIRST visible saved network, even a weak
 #         far-away one - that one then drops after ~1 minute), internet check retries while the
 #         link settles, speed test with signal / channel / transmit rate in the log.
+#   v2.2: Wi-Fi package 2.3 (radio stopped cleanly before sleep and restarted with fresh firmware
+#         after every wake, faster recovery) and, at the end, the Wi-Fi recorder (wifi-log.sh)
+#         instead of the 3-minute lid check: it records until you press Enter.
 # Network settings backup: /Users/Shared/UX325EA-Logs/network-backup-<time>/
 # Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt on the USB (+ /Users/Shared/UX325EA-Logs)
 # v1.x (AirportItlwm era) is in UX325EA-RESCUE/BACKUPS.
@@ -27,7 +30,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=2.1
+VERSION=2.2
 PKGID=local.zenbook.macos.wifi
 WC="/Library/Application Support/ZenBook Wi-Fi/WakeCheck"
 WAGENT=/Library/LaunchAgents/local.zenbook.wifi.wakecheck.plist
@@ -96,6 +99,7 @@ mkdir -p "$LOGDIR" 2>/dev/null; LOG="$LOGDIR/wifi-fix-$TS.txt"
 USBLOG="$SCRIPT_DIR/UX325EA-RESCUE/TEST-RESULTS"
 savelog() { sleep 0.5; [ "$DRY" != 1 ] && [ -d "$USBLOG" ] && /bin/cp "$LOG" "$USBLOG/" 2>/dev/null; return 0; }
 trap savelog EXIT
+exec 3>&1 4>&2
 exec > >(tee -a "$LOG") 2>&1
 U="${SUDO_USER:-$(stat -f %Su /dev/console)}"; UID_U="$(id -u "$U")"
 UH="$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"; [ -n "$UH" ] || UH="$(eval echo "~$U")"
@@ -328,38 +332,24 @@ if [ -d "$HU" ] && [ -n "$HVU" ] && [ "$HVI" != "$HVU" ]; then
 else ok "ZenBookHelper ${HVI:-?} is installed"; fi
 
 # ---------------------------------------------------------------------------
-# 6. Result, optional lid check
+# 6. Result, then the Wi-Fi recorder
 # ---------------------------------------------------------------------------
 echo ""
 if [ "$RESTART" = 1 ]; then
     echo "=== RESTART NEEDED: eject the USB, restart (internal SSD), sign in, then run this script once"
     echo "    more - it finishes the network part with the itlwm driver running."
-elif [ -n "$ITF" ] && [ "$DRY" != 1 ]; then
-    echo "  LID CHECK (optional). Press Enter to start it (or type s and Enter to skip): "
-    A=""; read -r A < /dev/tty
-    if [ "$(printf '%s' "$A" | cut -c1 | tr S s)" != s ]; then
-        wk() { sysctl -n kern.waketime 2>/dev/null | sed -E 's/^[{] sec = ([0-9]+).*/\1/'; }
-        W0="$(wk)"; savelog
-        echo "  >>> Close the lid NOW. Wait 1 minute. Open it and log in. Then do NOTHING for $((CHECK_SECONDS / 60)) minutes."
-        T=0; while [ "$(wk)" = "$W0" ] && [ $T -lt 900 ]; do sleep 2; T=$((T + 2)); done
-        if [ "$(wk)" = "$W0" ]; then bad "no lid sleep seen in 15 minutes - lid check stopped"; else
-            sleep 5; T0=$(date +%s); N=0; OKN=0; FIRST=""
-            while [ $(( $(date +%s) - T0 )) -lt "$CHECK_SECONDS" ]; do
-                E=$(( $(date +%s) - T0 )); N=$((N + 1))
-                if reachable_like_heliport && curl -s -m 5 --interface "$ITF" http://captive.apple.com/hotspot-detect.html 2>/dev/null | grep -q Success; then
-                    OKN=$((OKN + 1)); M=ok; else M="NO INTERNET"; [ -z "$FIRST" ] && FIRST=$E; fi
-                printf "    %3d s  %-12s %s\n" "$E" "$M" "$(status_now)"
-                sleep 10
-            done
-            if [ "$OKN" = "$N" ]; then ok "Wi-Fi worked the whole time after the lid ($OKN/$N checks)"
-            elif [ "$OKN" -ge $((N - 4)) ]; then ok "Wi-Fi worked $OKN/$N checks (short gap at ${FIRST} s while it rejoined)"
-            else bad "Wi-Fi failed $((N - OKN)) of $N checks after the lid (first at ${FIRST} s)"; fi
-            echo "--- agent log after the lid:"; tail -20 "$UH/Library/Logs/ZenBook Wi-Fi/Last Wake.txt" 2>/dev/null
-        fi
-    else echo "  Lid check skipped."; fi
 fi
 echo ""
-if [ "$FAILS" = 0 ] && [ "$RESTART" = 0 ]; then echo "=== DONE - all saved on the SSD permanently. You can unplug the USB."
+if [ "$FAILS" = 0 ] && [ "$RESTART" = 0 ]; then echo "=== DONE - all fixes saved on the SSD permanently (keep the USB in: the recorder copies its log there)."
 elif [ "$FAILS" != 0 ]; then echo "=== $FAILS problem(s) - bring the USB back (the log shows why)."; fi
 echo "    Speed: Applications -> ZenBook Wi-Fi Repair -> Test Speed"
 echo "    Log: $LOG (also on the USB: UX325EA-RESCUE/TEST-RESULTS)"
+# v2.2: hand over to the Wi-Fi recorder (it records until Enter, through any number of lid sleeps)
+if [ "$RESTART" = 0 ] && [ -f "$SCRIPT_DIR/wifi-log.sh" ] && [ "$DRY" != 1 ]; then
+    echo ""
+    echo "=== NEXT: the Wi-Fi recorder starts in 5 seconds. Use the laptop normally and close / open the"
+    echo "    lid as often as you like. Press Enter to stop it. (Ctrl+C now to skip it.)"
+    sleep 5; savelog; trap - EXIT
+    exec 1>&3 2>&4 3>&- 4>&-
+    ZB_FROM_COPY="" exec /bin/bash "$SCRIPT_DIR/wifi-log.sh"
+fi

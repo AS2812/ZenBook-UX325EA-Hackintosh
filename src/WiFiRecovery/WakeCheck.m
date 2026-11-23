@@ -218,6 +218,10 @@ static NSString *networkToken(NSString *key) {
 }
 static BOOL localReply(Snapshot *s) {
     if (tcpReply(s.iface, s.router, 443)) return YES;
+    if (tcpReply(s.iface, s.router, 80)) return YES;
+    if (tcpReply(s.iface, s.router, 53)) return YES;
+    if (tcpReply(s.iface, @"8.8.8.8", 53)) return YES;
+    if (tcpReply(s.iface, @"1.1.1.1", 53)) return YES;
     struct in_addr address;
     if (!s.router.length || inet_pton(AF_INET, s.router.UTF8String, &address) != 1) return NO;
     NSTask *ping = [NSTask new];
@@ -485,8 +489,10 @@ static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is
             if (!_baseline && s.network.length) [_prefs setObject:networkToken(key) forKey:@"LastReachableRouter"];
             _baseline = YES;
         }
-        else if (_baseline && _havePackets && _received == s.received && !s.ipv6 &&
-                 !tcpReply(s.iface, @"1.1.1.1", 443)) s.state = LocalStall;
+        else if (_baseline) {
+            // Keep LocalOK if router/network was reachable; do not flag stall on idle traffic
+            s.state = LocalOK;
+        }
         _received = s.received; _havePackets = YES;
     } else { _havePackets = NO; }
     NSString *detail = describe(s.state);

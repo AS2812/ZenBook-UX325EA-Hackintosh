@@ -39,7 +39,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
 VERSION=3.1
-PKGID=local.zenbook.macos.wifi
+PKGID=local.zenbook.karim.wifi
 WC="/Library/Application Support/ZenBook Wi-Fi/WakeCheck"
 WAGENT=/Library/LaunchAgents/local.zenbook.wifi.wakecheck.plist
 WDAEMON=/Library/LaunchDaemons/local.zenbook.wifi.ipconfig.plist

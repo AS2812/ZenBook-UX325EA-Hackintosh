@@ -242,6 +242,8 @@ Run `sudo sh "/Volumes/<USB>/fix-wifi.sh"` once: it installs the Wi-Fi package, 
 battery idle sleep that switched Wi-Fi off two minutes after the lid was opened and offers a
 hands-off lid check. The package's recovery agent restarts the radio if the network list stays
 empty for a minute; **ZenBook Wi-Fi Repair → Show Report** saves the wake history.
+Keep **Auto Join** in HeliPort only on your home network: HeliPort joins the first saved network
+it sees, even a weak one that then drops after about a minute.
 Details in [docs/WIFI.md](docs/WIFI.md).
 
 </details>

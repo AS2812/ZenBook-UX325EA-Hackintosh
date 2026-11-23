@@ -1,14 +1,30 @@
-ZenBook UX325EA Hackintosh - v10.13 (2026-11-23)
+ZenBook UX325EA Hackintosh - v10.14 (2026-11-23)
 =================================================
 
-WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.0 + Wi-Fi package 2.2, 2026-11-23)
+WHY WI-FI IS SLOW / LOST AFTER A MINUTE (found 2026-11-23 from the laptop's own log)
+  1. HeliPort joins the FIRST saved network it can see, even a weak far-away one. The log shows
+     it joining "Neighbour" (5 GHz, signal -86 dBm) and losing it ~90 s later, then going back to
+     your home Wi-Fi. FIX: HeliPort icon -> Preferences -> Networks -> Auto Join ONLY on your home Wi-Fi.
+  2. Weak signal where the ZenBook was: -74 to -86 dBm (the M4 Mac here: -59 dBm). Under about
+     -75 dBm Wi-Fi gets slow and drops. Sit closer, or put the router higher / more central.
+  3. Your home router (ZTE H188A) is 2.4 GHz only, auto channel 3 (overlaps 1 and 6). On this
+     Intel card 2.4 GHz is shared with Bluetooth. Router settings (192.168.1.1): channel 1, 6
+     or 11 (fixed, NOT 12/13 - the ZenBook uses US channels 1-11), 20 MHz, WPA2-PSK AES only.
+  4. Your internet line: 34 Mbps down / 16 Mbps up (measured on the M4 here). That is the most
+     the ZenBook can reach too. A dual-band (5 GHz) router or access point is the big upgrade.
+  The driver is already the newest official one (itlwm 2.3.0 - more stable and faster than
+  AirportItlwm per its docs). The new "Wi-Fi 6" test drivers online are experimental (AX210
+  only, not this AX201) - not used.
+
+WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.1 + Wi-Fi package 2.2, 2026-11-23)
 
   Sign in to macOS, plug in this USB, open Terminal and type:
 
       sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 
   It installs/updates the Wi-Fi package, fixes HeliPort's "!" and hides the macOS Wi-Fi
-  icon, sets the sleep timers, then offers a lid check. If it says RESTART NEEDED: restart from
+  icon, checks HeliPort's auto-join list (point 1 above), runs a speed test with the signal,
+  sets the sleep timers, then offers a lid check. If it says RESTART NEEDED: restart from
   the SSD and run it once more. Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt
 
   The two "!" icons:

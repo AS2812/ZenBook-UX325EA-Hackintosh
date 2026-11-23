@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v2.0
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v2.1
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 #
@@ -16,6 +16,9 @@
 #      (wifi-driver.sh airport brings it back.)
 #   4. Power: no idle sleep 2 minutes after opening the lid (battery 5/30 min, charger never).
 #   5. ZenBookHelper from this USB, optional lid check.
+#   v2.1: HeliPort auto-join order (HeliPort joins the FIRST visible saved network, even a weak
+#         far-away one - that one then drops after ~1 minute), internet check retries while the
+#         link settles, speed test with signal / channel / transmit rate in the log.
 # Network settings backup: /Users/Shared/UX325EA-Logs/network-backup-<time>/
 # Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt on the USB (+ /Users/Shared/UX325EA-Logs)
 # v1.x (AirportItlwm era) is in UX325EA-RESCUE/BACKUPS.
@@ -24,7 +27,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=2.0
+VERSION=2.1
 PKGID=local.zenbook.macos.wifi
 WC="/Library/Application Support/ZenBook Wi-Fi/WakeCheck"
 WAGENT=/Library/LaunchAgents/local.zenbook.wifi.wakecheck.plist
@@ -57,6 +60,20 @@ reachable_like_heliport() {   # same rule as HeliPort's icon: reachable and no c
     local r; r="$(scutil -r captive.apple.com 2>/dev/null)"
     case "$r" in Reachable*) case "$r" in *"Connection Required"*) return 1 ;; esac; return 0 ;; esac
     return 1
+}
+heliport_saved() {   # stdin: security dump-keychain -> order<TAB>autoJoin<TAB>ssid (attributes only, no passwords)
+    awk '
+    function flush() { if (svc == "com.OpenIntelWireless.HeliPort" && acct != "") print (ord == "" ? 0 : ord) "\t" (aj == "" ? "true" : aj) "\t" acct
+                       svc = ""; acct = ""; ord = ""; aj = "" }
+    /^keychain: /      { flush() }
+    /"svce"<blob>="/   { v = $0; sub(/.*"svce"<blob>="/, "", v); sub(/"$/, "", v); svc = v }
+    /"acct"<blob>="/   { v = $0; sub(/.*"acct"<blob>="/, "", v); sub(/"$/, "", v); acct = v }
+    /"icmt"<blob>=/    { if (match($0, /"order": *-?[0-9]+/)) { v = substr($0, RSTART, RLENGTH); sub(/.*: */, "", v); ord = v }
+                         if (match($0, /"autoJoin": *(true|false)/)) { v = substr($0, RSTART, RLENGTH); sub(/.*: */, "", v); aj = v } }
+    END { flush() }' | sort -t "$(printf '\t')" -k1,1n
+}
+nq_mbps() {   # $1 key (dl_throughput|ul_throughput); stdin: networkQuality -c JSON -> Mbps with 1 decimal
+    grep -o "\"$1\" *: *[0-9.]*" | head -1 | sed 's/.*: *//' | awk '{ if ($1 > 0) printf "%.1f", $1 / 1000000 }'
 }
 [ -n "${ZB_SOURCE_ONLY:-}" ] && return 0 2>/dev/null
 
@@ -214,8 +231,13 @@ else
         if [ -n "$IP" ]; then ok "IP address $IP, router ${R:-?}"; else bad "no IP address on $ITF (is HeliPort connected?)"; fi
         if [ -n "$IP" ]; then
             [ -n "$R" ] && { ping -c 2 -t 4 -b "$ITF" "$R" >/dev/null 2>&1 && ok "router answers" || note "router does not answer ping (some routers never do)"; }
-            NET=0; curl -s -m 6 --interface "$ITF" -o /dev/null https://1.1.1.1/ && NET=1
-            BYNAME=0; curl -s -m 6 --interface "$ITF" http://captive.apple.com/hotspot-detect.html 2>/dev/null | grep -q Success && BYNAME=1
+            NET=0; BYNAME=0; TRY=0
+            while [ $TRY -lt 5 ] && [ "$BYNAME" = 0 ]; do   # v2.1: the link may still be settling
+                [ $TRY -gt 0 ] && sleep 5; TRY=$((TRY + 1))
+                curl -s -m 6 --interface "$ITF" -o /dev/null https://1.1.1.1/ && NET=1
+                curl -s -m 6 --interface "$ITF" http://captive.apple.com/hotspot-detect.html 2>/dev/null | grep -q Success && BYNAME=1
+            done
+            [ "$TRY" -gt 1 ] && note "internet check needed $TRY tries"
             if [ "$BYNAME" = 1 ]; then ok "internet and DNS work over the Intel card"
             elif [ "$NET" = 1 ]; then
                 note "internet works but names do not resolve - using 1.1.1.1 and 8.8.8.8 for \"$S\""
@@ -227,6 +249,47 @@ else
         if reachable_like_heliport; then ok "HeliPort's own check passes - its icon shows signal bars, no \"!\""
         else bad "HeliPort's check (captive.apple.com reachable) still fails - its icon keeps the \"!\""; fi
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2b. HeliPort auto-join order (v2.1)
+# ---------------------------------------------------------------------------
+echo ""; echo "--- 2b. HeliPort saved networks (auto-join order)"
+SAVED="$(as_u security dump-keychain 2>/dev/null | heliport_saved)"
+if [ -z "$SAVED" ]; then note "no saved networks found in HeliPort yet (join your home Wi-Fi in HeliPort once, tick Auto Join)"
+else
+    printf '%s\n' "$SAVED" | awk -F'\t' '{ printf "    %d. %-28s Auto Join %s\n", NR, $3, ($2 == "true" ? "ON" : "off") }'
+    NAUTO="$(printf '%s\n' "$SAVED" | awk -F'\t' '$2 == "true"' | wc -l | tr -d ' ')"
+    if [ "$NAUTO" -gt 1 ]; then
+        bad "HeliPort has $NAUTO networks on Auto Join. It joins the FIRST one it can see in this list - even a weak, far-away one, which then drops after about a minute (after every start and every lid wake)."
+        echo "  >>> FIX (30 seconds): click the HeliPort icon -> Preferences -> Networks."
+        echo "      Leave Auto Join ticked ONLY for your home Wi-Fi (untick the others, or select one and"
+        echo "      press - to remove it), or drag your home Wi-Fi to the top. Close the window."
+        if [ "$DRY" != 1 ]; then
+            echo "      Press Enter when done (or s and Enter to skip): "; A=""; read -r A < /dev/tty
+            SAVED2="$(as_u security dump-keychain 2>/dev/null | heliport_saved)"
+            N2="$(printf '%s\n' "$SAVED2" | awk -F'\t' '$2 == "true"' | wc -l | tr -d ' ')"
+            FIRST2="$(printf '%s\n' "$SAVED2" | awk -F'\t' '$2 == "true" { print $3; exit }')"
+            if [ "$N2" -le 1 ]; then FAILS=$((FAILS - 1)); ok "HeliPort auto-joins only: ${FIRST2:-none}"
+            else note "still $N2 networks on Auto Join - first in line: $FIRST2"; fi
+        fi
+    else ok "only one network on Auto Join: $(printf '%s\n' "$SAVED" | awk -F'\t' '$2 == "true" { print $3; exit }')"; fi
+fi
+
+# ---------------------------------------------------------------------------
+# 2c. Speed and signal (v2.1) - Apple's networkQuality on the Intel card only
+# ---------------------------------------------------------------------------
+if [ -n "$ITF" ] && [ -n "$(ipconfig getifaddr "$ITF" 2>/dev/null)" ]; then
+    echo ""; echo "--- 2c. speed test over the Intel card (about 30 seconds, uses ~100-300 MB)"
+    J="$(networkQuality -I "$ITF" -s -c 2>/dev/null)"; DL="$(printf '%s' "$J" | nq_mbps dl_throughput)"; UL="$(printf '%s' "$J" | nq_mbps ul_throughput)"
+    LINK="$(grep -o '[0-9.]* GHz, channel [0-9]*, [0-9]* MHz, signal -[0-9]* dBm[^.]*' "$UH/Library/Logs/ZenBook Wi-Fi/Last Wake.txt" 2>/dev/null | tail -1)"
+    if [ -n "$DL" ]; then ok "download $DL Mbps, upload ${UL:-?} Mbps"; else bad "speed test did not finish"; fi
+    [ -n "$LINK" ] && echo "  link (agent, last logged): $LINK"
+    SIG="$(printf '%s' "$LINK" | sed -n 's/.*signal \(-[0-9]*\) dBm.*/\1/p')"
+    if [ -n "$SIG" ] && [ "$SIG" -lt -72 ]; then
+        note "signal $SIG dBm is WEAK (good is -65 or better): move closer to the router or put the router higher / more central."
+    fi
+    printf '%s' "$LINK" | grep -q "2.4 GHz" && note "2.4 GHz: this Intel card shares 2.4 GHz with Bluetooth - try Test Speed with Bluetooth off to compare."
 fi
 
 # ---------------------------------------------------------------------------

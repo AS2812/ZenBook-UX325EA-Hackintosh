@@ -3,6 +3,14 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.14 — 2026-11-23 · why Wi-Fi was slow and dropped after a minute
+
+- **`fix-wifi.sh` 2.1** — lists HeliPort's auto-join order and walks you through fixing it
+  (HeliPort joins the first visible saved network even at -86 dBm, which then drops after about a
+  minute), retries the internet check while the link settles, and runs a speed test over the
+  Intel card with signal, channel and transmit rate in the log.
+- [docs/WIFI.md §6](docs/WIFI.md) — what really limits Wi-Fi on this laptop, with sources.
+
 ## v10.13 — 2026-11-23 · one command for Wi-Fi, no more "!" icons
 
 - **`fix-wifi.sh` 2.0** — installs / updates the Wi-Fi package and its jobs, gives the Intel

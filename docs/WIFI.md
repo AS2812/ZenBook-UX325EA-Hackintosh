@@ -94,6 +94,22 @@ The old "Wi-Fi" service from AirportItlwm keeps the same BSD name (`en0`) but is
 leftover service for the Intel card's and never create the missing one. 2.2 also compares
 the interface type, so the root DHCP job re-creates a missing service by itself.
 
+## 6. Slow or lost Wi-Fi: what actually limits it (research, 2026-11-23)
+
+| Factor | Evidence | What to do |
+|---|---|---|
+| **HeliPort auto-join order** | HeliPort tries saved networks in list order and joins the first visible one, ignoring signal strength (`NetworkManager.scanSavedNetworks`). The laptop log showed it joining a far 5 GHz network at -86 dBm, losing it ~90 s later, then rejoining home. | Keep **Auto Join** only on your home network (HeliPort → Preferences → Networks), or drag it to the top. `fix-wifi.sh` 2.1 lists the order and checks it. |
+| **Signal level** | -74 … -86 dBm on the laptop vs -59 dBm for a Mac near the router. | Aim for -65 dBm or better. |
+| **2.4 GHz + Bluetooth** | The itlwm FAQ notes 2.4 GHz performance issues with Bluetooth coexistence; the AX201 shares the band and antenna. | Use 5 GHz where possible; compare Test Speed with Bluetooth off. |
+| **Router channel / security** | Auto channel 3 overlaps 1 and 6. With TKIP as the *pairwise* cipher itlwm (OpenBSD net80211) refuses 802.11n/ac (`ieee80211_ht_negotiate`); mixed TKIP+AES still picks AES. | Fixed channel 1, 6 or 11, 20 MHz, WPA2-PSK AES only. |
+| **Driver** | itlwm 2.3.0 is the latest official release. The FAQ quotes up to 950 / 650 Mbps on 5 GHz 160 MHz (AX201 tested; 802.11ax disabled, 11ac used). The project calls itlwm "stabler and faster" than AirportItlwm. | Stay on itlwm. Community "Wi-Fi 6" AirportItlwm forks from Nov 2026 are experimental debug builds tested on AX210 only. |
+| **Hardware** | The AX201 is a CNVi module; a Broadcom or AX210 card needs a PCIe-capable slot. A UX325EA teardown confirming a removable slot was not found. | A USB-C Ethernet adapter is the zero-risk wired option. |
+
+Sources: [itlwm FAQ](https://openintelwireless.github.io/itlwm/FAQ.html) ·
+[itlwm installation notes](https://openintelwireless.github.io/itlwm/Installation.html) ·
+[itlwm releases](https://github.com/OpenIntelWireless/itlwm/releases) ·
+[Notebookcheck UX325EA review (Windows iperf3)](https://www.notebookcheck.net/Asus-ZenBook-13-laptop-review-Core-i7-1165G7-versus-Ryzen-7-5800U-Which-one-is-the-better-ZenBook.540357.0.html)
+
 ## Checking it yourself
 
 ```sh

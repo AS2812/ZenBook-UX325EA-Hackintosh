@@ -96,7 +96,7 @@ one-click speed test that shows the band, channel and signal.
 | Fn hotkeys, also after lid wake | ✅ | AsusSMC, BrightnessKeys-UX325, `SSDT-KBL`, `SSDT-KEYS`, `SSDT-WAKE` |
 | Keyboard backlight (Fn+F7, 4 levels) | ✅ | `SSDT-KBL` |
 | Trackpad gestures, two-finger menu, NumberPad | ✅ | VoodooI2C/HID + ZenBookHelper |
-| Wi-Fi 6 | ✅ | itlwm 2.3.0 + HeliPort 1.5.0 (`wifi-driver.sh` switches to AirportItlwm) |
+| Wi-Fi 6 | ✅ | itlwm 2.3.1 "UX325" (patched 2.3.0, [src/itlwm-UX325](src/itlwm-UX325)) + HeliPort 1.5.0 |
 | Bluetooth | ✅ | IntelBluetoothFirmware + BlueToolFixup, USB map |
 | Speakers, headphones, mute | ✅ | AppleALC `alcid=66`, amplifier re-enabled at start-up and after wake |
 | Sleep & wake (lid and power button) | ✅ | `SSDT-WAKE`, ZenBookHelper, sleep settings from `fix-wifi.sh` |
@@ -189,7 +189,7 @@ Everything in [`usb-kit/`](usb-kit) runs from the USB's data partition.
 | `fix-hardware.sh` | applies every fix · `--test` guided test with report · `--audit` · `--diagnose` · `--gpu-*` profiles |
 | `sync-efi-to-ssd.sh` | copies the tested EFI to the internal SSD, verified byte for byte, never touches `\EFI\Microsoft` |
 | `make-mac-only.sh` | removes Windows and gives macOS the whole SSD (check mode by default) |
-| `wifi-driver.sh` | switches **itlwm + HeliPort** ⇄ **AirportItlwm** on the SSD's and the USB's EFI, with backups |
+| `wifi-driver.sh` | switches **itlwm + HeliPort** ⇄ **AirportItlwm** on the SSD's and the USB's EFI, with backups · `stock` puts the official itlwm back |
 | `fix-wifi.sh` | **one command for Wi-Fi**: installs the Wi-Fi package, gives the Intel card a working network service (clears HeliPort's "!"), hides the unusable macOS Wi-Fi icon, sleep timers, optional lid check |
 | `wifi-log.sh` | Wi-Fi recorder: a line every 5 s and every outage with its time since the wake, through any number of lid sleeps, until you press Enter |
 | `zenbook-status.sh` | read-only report: Wi-Fi driver and debug flags on the SSD, helper, Wi-Fi, CPU and memory |

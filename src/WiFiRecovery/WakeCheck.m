@@ -336,6 +336,17 @@ static unsigned scanCount(int *best) {   // networks in the driver's cache and t
     return n;
 }
 static NSString *describe(LinkStatus state);
+static NSString *driverVersion(void) {   // 2.5: proves which itlwm build is running
+    io_connect_t c = adapter();
+    if (!c) return nil;
+    struct ioctl_driver_info d = {0};
+    NSString *v = nil;
+    if (readMethod(c, IOCTL_80211_DRIVER_INFO, &d, sizeof(d)) &&
+        memchr(d.driver_version, 0, sizeof(d.driver_version)) && memchr(d.fw_version, 0, sizeof(d.fw_version)))
+        v = [NSString stringWithFormat:@"itlwm %s, firmware %s", d.driver_version, d.fw_version];
+    IOServiceClose(c);
+    return v;
+}
 static NSString *linkLine(void) {
     Snapshot *s = snapshot();
     int best = 0; unsigned n = s.state >= Searching ? scanCount(&best) : 0;
@@ -438,7 +449,8 @@ static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is
         _policy.wasJoined = true;
     _wantOn = [_prefs boolForKey:@"LastRadioOn"];
     _frozenNotified = NO;
-    [self record:event];
+    NSString *dv = driverVersion();
+    [self record:dv ? [NSString stringWithFormat:@"%@ (%@)", event, dv] : event];
 }
 - (void)tick {
     uid_t active = 0;
@@ -706,7 +718,7 @@ static void showReport(void) {
     if ([panel runModal] != NSModalResponseOK) return;
     NSString *speed = [NSString stringWithContentsOfURL:homePath(@"Library/Logs/ZenBook Wi-Fi/Speed Test.txt")
         encoding:NSUTF8StringEncoding error:NULL];
-    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.4\n\n%@\n\n%@",
+    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.5\n\n%@\n\n%@",
         speed ?: @"No speed test recorded.", wake];
     NSError *error = nil;
     if (![report writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:&error])

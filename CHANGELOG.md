@@ -3,6 +3,18 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.17 — 2026-11-23 · patched Wi-Fi driver: the card no longer stays dead after a crash
+
+- **itlwm 2.3.1 "UX325"** ([src/itlwm-UX325](src/itlwm-UX325)) — official 2.3.0 source with four
+  changes: restart the AX201 after a fatal firmware error / timeout / overheat (OpenBSD leaves it
+  stopped — the root of "no networks until power-off"), a full start sequence on radio-on (one 50 ms
+  ready check used to give up), a reset when the card does not answer at boot (driver missing after
+  a restart), and its messages in the macOS log. Same kernel imports as the official build.
+- **Wi-Fi package 2.5** ships it to the SSD only; the USB EFI keeps the official driver.
+  `wifi-driver.sh stock` rolls back in one command. The agent logs the running driver and firmware.
+- `fix-wifi.sh` 3.1 shows the running driver and its recent errors and asks for one Shut Down after
+  the new driver is installed; `wifi-log.sh` 1.3 lists the driver's messages in the summary.
+
 ## v10.16 — 2026-11-23 · the AX201 freeze: detect it, say what to do, record the cure
 
 - Laptop logs show the real failure: the AX201 suddenly hears **zero networks** about 8–9 minutes after

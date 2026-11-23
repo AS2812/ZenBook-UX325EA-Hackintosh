@@ -1,10 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - choose the Wi-Fi driver                   v1.1
+# ASUS ZenBook 13 OLED (UX325EA) - choose the Wi-Fi driver                   v1.2
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" itlwm     STABLE: itlwm + HeliPort
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" airport   back to AirportItlwm
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" status    show which one is on
+#   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" stock     ROLLBACK: the official itlwm 2.3.0
+#        from this USB's EFI replaces the patched itlwm 2.3.1 (Wi-Fi package 2.5) on the SSD
 #
 # Why (logs 2026-11-21): AirportItlwm 2.3.0 drops the router 10-95 s after joining (with or
 # without the lid), sometimes refuses all scans afterwards ("Scan request failed (22)") and
@@ -25,7 +27,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
 MODE="${1:-itlwm}"
-case "$MODE" in itlwm|airport|status) ;; *) echo "Use: itlwm | airport | status"; exit 2 ;; esac
+case "$MODE" in itlwm|airport|status|stock) ;; *) echo "Use: itlwm | airport | status | stock"; exit 2 ;; esac
 TEST=0; [ -n "${ZB_TEST_ESPS:-}" ] && TEST=1
 if [ "$TEST" = 0 ] && [ "$(id -u)" -ne 0 ]; then
     echo "[*] Administrator rights are needed (EFI partitions) - asking for your password..."
@@ -44,7 +46,7 @@ ok()   { echo "  [OK]   $*"; }
 fail() { echo ""; echo "[ERROR] $*"; echo "        Nothing more was changed. Log: $LOG"; exit 1; }
 pinfo() { diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
 PB=/usr/libexec/PlistBuddy
-echo "=== ZenBook UX325EA - Wi-Fi driver v1.1 ($TS) mode: $MODE  user: $U"
+echo "=== ZenBook UX325EA - Wi-Fi driver v1.2 ($TS) mode: $MODE  user: $U"
 
 # ---------------------------------------------------------------------------
 # 1. The two EFI partitions: internal SSD (starts the laptop) and this USB
@@ -92,7 +94,7 @@ for E in "${ESPLIST[@]}"; do
         IT="$(idx "$CFG" itlwm.kext)" || fail "$CFG has no itlwm.kext entry"
         if [ "$MODE" = status ]; then echo "  $CFG: AirportItlwm $(state "$CFG" AirportItlwm.kext), itlwm $(state "$CFG" itlwm.kext)"; continue; fi
         D="$BK/$(echo "$E" | tr '/ ' '__')"; mkdir -p "$D" && /bin/cp -X "$CFG" "$D/" || fail "backup of $CFG failed"
-        if [ "$MODE" = itlwm ]; then A=false; T=true; else A=true; T=false; fi
+        if [ "$MODE" = itlwm ] || [ "$MODE" = stock ]; then A=false; T=true; else A=true; T=false; fi
         $PB -c "Set :Kernel:Add:$IA:Enabled $A" -c "Set :Kernel:Add:$IT:Enabled $T" "$CFG" || fail "could not edit $CFG"
         plutil -lint "$CFG" >/dev/null || { /bin/cp -X "$D/$(basename "$CFG")" "$CFG"; fail "$CFG broke - restored the backup"; }
         [ "$(state "$CFG" AirportItlwm.kext)" = "$A" ] && [ "$(state "$CFG" itlwm.kext)" = "$T" ] || fail "$CFG did not change"
@@ -106,7 +108,23 @@ for E in "${ESPLIST[@]}"; do
     fi
     find "$E/EFI" -name '._*' -delete 2>/dev/null
 done
-[ "$MODE" = status ] || ok "$N config files: $( [ "$MODE" = itlwm ] && echo 'itlwm ON, AirportItlwm off' || echo 'AirportItlwm ON, itlwm off') (backup: $BK)"
+[ "$MODE" = status ] || ok "$N config files: $( [ "$MODE" = airport ] && echo 'AirportItlwm ON, itlwm off' || echo 'itlwm ON, AirportItlwm off') (backup: $BK)"
+for E in "${ESPLIST[@]}"; do   # which itlwm build sits in each EFI
+    [ -n "$E" ] && [ -f "$E/EFI/OC/Kexts/itlwm.kext/Contents/Info.plist" ] && \
+        echo "  itlwm in $E: $($PB -c 'Print :CFBundleShortVersionString' "$E/EFI/OC/Kexts/itlwm.kext/Contents/Info.plist" 2>/dev/null)"
+done
+# v1.2 rollback: copy the official itlwm 2.3.0 from this USB's EFI onto the SSD's EFI
+if [ "$MODE" = stock ]; then
+    SSDE="${ESPLIST[0]:-}"; USBE="${ESPLIST[1]:-}"
+    SRC="$USBE/EFI/OC/Kexts/itlwm.kext"; DST="$SSDE/EFI/OC/Kexts/itlwm.kext"
+    [ -n "$USBE" ] && [ -f "$SRC/Contents/MacOS/itlwm" ] || fail "the USB's EFI with the official itlwm was not found"
+    [ "$($PB -c 'Print :CFBundleShortVersionString' "$SRC/Contents/Info.plist" 2>/dev/null)" = 2.3.0 ] || fail "the USB's itlwm is not the official 2.3.0"
+    mkdir -p "$BK/ssd-itlwm" && /bin/cp -R "$DST" "$BK/ssd-itlwm/" || fail "backup of the SSD's itlwm failed"
+    rm -rf "$DST" && /bin/cp -R "$SRC" "$DST" && cmp -s "$SRC/Contents/MacOS/itlwm" "$DST/Contents/MacOS/itlwm" \
+        || { rm -rf "$DST"; /bin/cp -R "$BK/ssd-itlwm/itlwm.kext" "$DST"; fail "copy failed - the previous itlwm was put back"; }
+    find "$SSDE/EFI" -name '._*' -delete 2>/dev/null
+    ok "SSD now has the official itlwm 2.3.0 (patched one backed up in $BK/ssd-itlwm)"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. HeliPort (itlwm mode): app + start at login
@@ -166,6 +184,7 @@ case "$MODE" in
            echo "    and joins by itself after every start and every lid sleep."
            echo "    Back to the old driver: sudo sh \"$SCRIPT_DIR/wifi-driver.sh\" airport" ;;
   airport) echo "=== DONE. Restart the laptop - the normal macOS Wi-Fi menu is back." ;;
+  stock)   echo "=== DONE. Apple menu > Shut Down, wait 30 s, power on - the official itlwm 2.3.0 runs again." ;;
   status)  echo "=== status only, nothing changed" ;;
 esac
 echo "    Log: $LOG"

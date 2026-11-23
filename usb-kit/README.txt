@@ -1,29 +1,35 @@
-ZenBook UX325EA Hackintosh - v10.16 (2026-11-23)
+ZenBook UX325EA Hackintosh - v10.17 (2026-11-23)
 =================================================
 
 =====================================================================================
-WI-FI - FULL STEPS (fix-wifi.sh v3.0 + Wi-Fi package 2.4 + recorder wifi-log.sh v1.2)
+WI-FI - FULL STEPS (fix-wifi.sh v3.1 + Wi-Fi package 2.5 with a PATCHED Wi-Fi driver)
 =====================================================================================
-WHAT IS WRONG (from your laptop's logs, 2026-11-23): the Intel AX201 card FREEZES - it suddenly
-hears ZERO networks, about 8-9 minutes after a lid wake (12:53:48 and 13:23:42) or under heavy use
-(the speed test at 15:34). A radio restart cannot revive it, and a normal Restart often cannot
-either (then Wi-Fi does not start at boot - 15:37). Only a real power-off resets it. The weak
-2.4 GHz signal (-70 to -88 dBm) and the old router make it worse.
+WHAT IS WRONG (your logs, 2026-11-23): the Intel AX201 card crashes - it suddenly hears ZERO
+networks (~8-9 min after a lid wake, or under heavy use). The official driver (itlwm 2.3.0, from
+OpenBSD) then STOPS the card on purpose and never starts it again, and its "radio on" path gives
+up after one 50 ms check - so the card stayed dead until a power-off. Its error messages never
+reached the macOS log.
+THE FIX (like the hotkeys fix - in the driver itself): itlwm 2.3.1 "UX325" built from the official
+2.3.0 source with 4 changes:
+  1. after a firmware crash / overheat / device timeout it RESTARTS the card (like Linux does),
+     at most 5 times in 10 minutes
+  2. radio on always runs the full start sequence (retries, software reset, power gating)
+  3. a card that does not answer at boot is reset and read again (Wi-Fi missing after restart)
+  4. its messages ("itlwm: ... UX325 ...") reach the macOS log, so the recorder shows WHY
 
 STEP 1  If Wi-Fi is dead or did not start: Apple menu > Shut Down (NOT Restart). Wait 30 s.
         Press the power button.
 STEP 2  Sign in, plug in this USB, open Terminal and type:
             sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
-        Type your password. At the speed test question type s and Enter (it can freeze the card).
-        It installs Wi-Fi package 2.4 and every fix, then the RECORDER starts by itself.
-STEP 3  Use the laptop normally. Close the lid 1 minute and open it. Then leave it 10+ minutes.
-        If the card freezes, a message pops up: first close the lid 15 seconds and open it;
-        if Wi-Fi is still dead, Shut Down (not Restart). The log records which one worked.
-STEP 4  Press Enter in Terminal to stop the recorder.
-STEP 5  Test B - Bluetooth OFF (Control Centre > Bluetooth off), then in Terminal:
-            sudo sh "/Volumes/Install macOS Sonoma/wifi-log.sh"
-        Repeat step 3, press Enter. (If Wi-Fi never freezes with Bluetooth off -> Bluetooth.)
-STEP 6  Bring the USB back. Logs: UX325EA-RESCUE/TEST-RESULTS/wifi-log-*.txt
+        Type your password. At the speed test question type s and Enter.
+STEP 3  It installs package 2.5 and says SHUT DOWN NEEDED (the new driver loads at start):
+        Apple menu > Shut Down, wait 30 s, power on, sign in.
+STEP 4  Run the same command again (step 2). Now it ends with the RECORDER.
+STEP 5  Use the laptop normally: close the lid 1 minute, open it, leave it 10+ minutes, use it.
+STEP 6  Press Enter in Terminal to stop the recorder. Bring the USB back.
+IF THE NEW DRIVER IS WORSE (rollback to the official one, 1 minute):
+            sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" stock
+        then Shut Down and power on. (Or boot from this USB: its EFI keeps the official driver.)
 ROUTER  (big help, 192.168.1.1): Security WPA2-PSK with AES only, channel 1, 6 or 11 fixed
         (not 12/13), width 20 MHz. Sit closer to the router if you can.
 =====================================================================================

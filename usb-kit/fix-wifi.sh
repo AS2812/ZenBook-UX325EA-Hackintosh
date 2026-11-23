@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v3.0
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v3.1
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 #
@@ -26,6 +26,10 @@
 #         lid sleep revives it). A frozen card (driver missing) is called out with the only fix that
 #         resets it: Shut Down, NOT Restart. The speed test is optional (it can freeze the card) and
 #         reports a freeze under heavy use.
+#   v3.1: Wi-Fi package 2.5 = patched itlwm 2.3.1 (UX325): restarts the card after a firmware
+#         crash / overheat instead of leaving it dead, full start sequence on radio-on, resets a
+#         card that does not answer at boot, and its messages reach the macOS log. Shows which
+#         driver runs and its recent error messages. Rollback: wifi-driver.sh stock
 # Network settings backup: /Users/Shared/UX325EA-Logs/network-backup-<time>/
 # Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt on the USB (+ /Users/Shared/UX325EA-Logs)
 # v1.x (AirportItlwm era) is in UX325EA-RESCUE/BACKUPS.
@@ -34,7 +38,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=3.0
+VERSION=3.1
 PKGID=local.zenbook.macos.wifi
 WC="/Library/Application Support/ZenBook Wi-Fi/WakeCheck"
 WAGENT=/Library/LaunchAgents/local.zenbook.wifi.wakecheck.plist
@@ -122,6 +126,7 @@ if [ "$(uname -m)" != x86_64 ] || [ "$(sysctl -n hw.optional.arm64 2>/dev/null |
 fi
 status_now() { if [ -x "$WC" ]; then "$WC" --status 2>/dev/null; else echo "(recovery agent not installed)"; fi; }
 itl_if() { ioreg -r -c itlwm -l -w0 2>/dev/null | sed -n 's/.*"BSD Name" = "\(en[0-9]*\)".*/\1/p' | head -1; }
+itl_running() { kextstat -l -b com.zxystd.itlwm 2>/dev/null | sed -n 's/.*com\.zxystd\.itlwm (\([^)]*\)).*/\1/p' | head -1; }
 airport_loaded() { ioreg -r -c AirportItlwm -d1 2>/dev/null | grep -q AirportItlwm; }
 
 # ---------------------------------------------------------------------------
@@ -132,7 +137,10 @@ sw_vers | tr '\n' ' '; echo
 echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
 echo "Wi-Fi package: $(pkgutil --pkg-info "$PKGID" 2>/dev/null | awk '/^version:/{print $2}')  agent: $(status_now)"
 echo "driver: itlwm interface '$(itl_if)'$(airport_loaded && echo ', AirportItlwm LOADED')"
-echo "HeliPort: $(pgrep -x HeliPort >/dev/null && echo running || echo 'not running')"
+echo "HeliPort: $(pgrep -x HeliPort >/dev/null && echo running || echo 'not running')   itlwm running: $(itl_running)"
+echo "--- Wi-Fi driver messages, last 60 min (patched driver 2.3.1 only):"
+log show --last 60m --style compact --predicate 'process == "kernel" AND eventMessage CONTAINS "itlwm:"' 2>/dev/null \
+    | grep -E "UX325|fatal|firmware error|critical temperature|device timeout|not ready|could not|NMI|No config" | tail -25
 networksetup -listallhardwareports 2>/dev/null | grep -E "Hardware Port|Device" | paste - - | sed 's/^/  /'
 networksetup -listnetworkserviceorder 2>/dev/null | grep -v asterisk | sed '/^$/d; s/^/  /'
 scutil --nwi 2>/dev/null | sed -n '1,12p' | mask
@@ -180,6 +188,10 @@ if [ -z "$ITF" ]; then
     elif [ -n "$VI" ] && [ "$UPDATED" = 0 ]; then
         FROZEN=1; bad "THE WI-FI CARD IS FROZEN: the itlwm driver did not start in this boot (a restart does not reset this card)"
     else note "the itlwm driver is not running in this start"; fi
+    RESTART=1
+fi
+if [ "$UPDATED" = 1 ] && [ -n "$ITF" ] && [ "$(itl_running)" != 2.3.1 ] && [ "$DRY" != 1 ]; then
+    note "the improved Wi-Fi driver (itlwm 2.3.1 UX325) is on the SSD now - it starts after Shut Down + power on"
     RESTART=1
 fi
 case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" -novht "*|*" -noht40 "*)

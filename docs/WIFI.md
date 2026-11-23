@@ -130,6 +130,21 @@ flags, so the agent judges by the scan list. Intel's own forum has AX201 reports
 2.4 detects the freeze, tells the user to close the lid for 15 s or **Shut Down (not Restart)**, and logs
 whether the lid revived it; `wifi-log.sh` with Bluetooth on vs off isolates the trigger.
 
+## 8. The root cause in the driver, and the patch (itlwm 2.3.1 "UX325")
+
+Reading the itlwm 2.3.0 source explained every symptom in §7:
+
+- `iwx_init_task` computes `fatal = HW_ERR | RFKILL`, stops the device and only calls `iwx_init` when
+  **not** fatal. A fatal firmware error, device timeout or critical-temperature stop therefore leaves
+  the card stopped for good — interface still "up", scan list empty.
+- Radio on (`ItlIwx::enable` → `DVACT_WAKEUP`) starts the card only if a single 50 ms `NIC_READY`
+  poll succeeds; after a crash it does not, so the agent's radio restart could not revive it.
+- At attach, a card that does not answer is "not recognised" and the driver does not start.
+- `XYLog` is `kprintf`, which macOS does not keep — so none of this was visible.
+
+The patch fixes all four ([src/itlwm-UX325](../src/itlwm-UX325)); its messages start with `itlwm:` and
+contain `UX325` when a recovery happens, and `wifi-log.sh` lists them.
+
 ## Checking it yourself
 
 ```sh

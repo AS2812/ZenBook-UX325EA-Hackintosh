@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi recorder: logs until you press Enter      v1.2
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi recorder: logs until you press Enter      v1.3
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-log.sh"
 #
@@ -12,6 +12,7 @@
 #   v1.2: ignores keys typed before it started (v1.1 stopped at once), "idle" = seconds since the
 #         last key/trackpad use (the screen goes dark at 300 s on battery), Bluetooth read from
 #         system_profiler once a minute, a frozen card (driver missing) is called out
+#   v1.3: the summary lists the Wi-Fi driver's own error / recovery messages (itlwm 2.3.1 UX325)
 #   outages   : start, how long after the wake, a snapshot at that moment, and how long it lasted
 #   beside it : the recovery agent's log (live) and driver / HeliPort / DHCP / sleep messages
 # Saved on the SSD (/Users/Shared/UX325EA-Logs) and copied to the USB every minute and at the end:
@@ -22,7 +23,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=1.2
+VERSION=1.3
 DRY="${ZB_DRY:-0}"
 INTERVAL="${ZB_INTERVAL:-5}"
 if [ "$DRY" != 1 ] && [ "$(id -u)" -ne 0 ]; then
@@ -75,6 +76,7 @@ trap 'stop_all; copy_usb' EXIT
 
 echo "=== ZenBook Wi-Fi recorder v$VERSION - started $(date '+%Y-%m-%d %H:%M:%S') - user $U $( [ "$DRY" = 1 ] && echo '(DRY RUN)')"
 sw_vers | tr '\n' ' '; echo
+echo "itlwm running: $(kextstat -l -b com.zxystd.itlwm 2>/dev/null | sed -n 's/.*com\.zxystd\.itlwm (\([^)]*\)).*/\1/p' | head -1)"
 echo "Wi-Fi package $(pkgutil --pkg-info local.zenbook.macos.wifi 2>/dev/null | awk '/^version:/{print $2}')  HeliPort $([ -f /Applications/HeliPort.app/Contents/Info.plist ] && /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/HeliPort.app/Contents/Info.plist 2>/dev/null || echo none)  itlwm interface ${ITF:-NONE}"
 echo "boot-args: $(nvram boot-args 2>/dev/null | cut -f2-)"
 pmset -g custom 2>/dev/null | grep -E "Power:|^ (sleep|displaysleep|lowpowermode) " | tr -s ' ' | paste -sd' ' -
@@ -163,6 +165,8 @@ echo "=== SUMMARY - recorded $(mins $(( END - START ))) (min:s), $N checks"
 echo "    online: $OKN of $N checks ($(( N > 0 ? OKN * 100 / N : 0 ))%)   lid wakes: $WAKES   outages: $NOUT   longest: $(mins "$LONGEST")"
 [ -n "$OUTAGES" ] && { echo "    outages:"; printf '%s' "$OUTAGES"; }
 echo "    Wi-Fi now: $(wifi)"
+echo "--- Wi-Fi driver messages during the recording (errors, restarts):"
+grep -E "itlwm: .*(UX325|fatal|firmware error|critical temperature|device timeout|not ready|could not|NMI|No config)" "$SYS" 2>/dev/null | tail -40
 echo "--- recovery agent log (last 30 lines):"; [ -f "$AGENTLOG" ] && tail -30 "$AGENTLOG"
 echo ""
 echo "Log: $LOG"

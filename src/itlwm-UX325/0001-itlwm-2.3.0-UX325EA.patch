@@ -1,0 +1,138 @@
+diff --git a/itl80211/linux/types.h b/itl80211/linux/types.h
+index b52204d..8fc38ec 100644
+--- a/itl80211/linux/types.h
++++ b/itl80211/linux/types.h
+@@ -110,10 +110,20 @@
+ 
+ #define BUILD_BUG_ON(condition) ((void)sizeof(char[1 - 2*!!(condition)]))
+ 
++/* UX325: also IOLog (rate-limited) - kprintf alone never reaches the macOS log */
++#ifdef __cplusplus
++extern "C" {
++#endif
++int xy_iolog_ok(void);
++void IOLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
++#ifdef __cplusplus
++}
++#endif
+ #define XYLog(fmt, x...)\
+ do\
+ {\
+ kprintf("%s: " fmt, "itlwm", ##x);\
++if (xy_iolog_ok()) IOLog("itlwm: " fmt, ##x);\
+ }while(0)
+ 
+ typedef UInt8  u8;
+diff --git a/itlwm/hal_iwx/ItlIwx.cpp b/itlwm/hal_iwx/ItlIwx.cpp
+index 32b5918..6b278c8 100644
+--- a/itlwm/hal_iwx/ItlIwx.cpp
++++ b/itlwm/hal_iwx/ItlIwx.cpp
+@@ -12899,6 +12899,27 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
+     sc->sc_hw_rev = (sc->sc_hw_rev & 0xfff0) |
+     (IWX_CSR_HW_REV_STEP(sc->sc_hw_rev << 2) << 2);
+     sc->sc_hw_rf_id = IWX_READ(sc, IWX_CSR_HW_RF_ID);
++    {
++        /*
++         * UX325: a card that froze before a warm restart can answer with all-ones / zero here;
++         * the adapter is then not recognised and the driver does not start at all. Reset it
++         * once and read again (only in that case).
++         */
++        uint32_t raw = IWX_READ(sc, IWX_CSR_HW_REV);
++        if (raw == 0xffffffff || raw == 0 || sc->sc_hw_rf_id == 0xffffffff || sc->sc_hw_rf_id == 0) {
++            XYLog("%s: UX325 adapter not answering at start (rev 0x%x rf 0x%x) - resetting it\n",
++                  DEVNAME(sc), raw, sc->sc_hw_rf_id);
++            IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
++            DELAY(5000);
++            iwx_prepare_card_hw(sc);
++            DELAY(5000);
++            sc->sc_hw_rev = IWX_READ(sc, IWX_CSR_HW_REV);
++            sc->sc_hw_rev = (sc->sc_hw_rev & 0xfff0) |
++            (IWX_CSR_HW_REV_STEP(sc->sc_hw_rev << 2) << 2);
++            sc->sc_hw_rf_id = IWX_READ(sc, IWX_CSR_HW_RF_ID);
++            XYLog("%s: UX325 after the reset: rev 0x%x rf 0x%x\n", DEVNAME(sc), sc->sc_hw_rev, sc->sc_hw_rf_id);
++        }
++    }
+     uint16_t device = sc->sc_pcitag->configRead16(kIOPCIConfigDeviceID);
+     uint16_t subsystem_device = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemID);
+     uint16_t subsystem_vendor = sc->sc_pcitag->configRead16(kIOPCIConfigSubSystemVendorID);
+@@ -13192,6 +13213,30 @@ iwx_init_task(void *arg1)
+     
+     if (!fatal && (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP)
+         that->iwx_init(ifp);
++    else if (fatal && !(sc->sc_flags & IWX_FLAG_RFKILL) &&
++             (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP) {
++        /*
++         * UX325: after a fatal firmware error, a device timeout or a critical-temperature stop,
++         * OpenBSD leaves the device down until "ifconfig up" - on macOS nothing ever does that,
++         * so the card stayed dead (empty scan list) until a power-off. Restart it like Linux
++         * iwlwifi does, at most 5 times in 10 minutes.
++         */
++        static uint64_t windowStart;
++        static int restarts;
++        uint64_t ns;
++        uint64_t abst; clock_get_uptime(&abst); absolutetime_to_nanoseconds(abst, &ns);
++        if (ns - windowStart > 600ULL * 1000000000ULL) { windowStart = ns; restarts = 0; }
++        if (restarts < 5) {
++            restarts++;
++            XYLog("%s: UX325 fatal error recovery - restarting the device (%d of 5 in 10 min)\n",
++                  DEVNAME(sc), restarts);
++            IOSleep(1000);
++            sc->sc_flags &= ~IWX_FLAG_HW_ERR;
++            int err = that->iwx_init(ifp);
++            XYLog("%s: UX325 fatal error recovery - restart %s (%d)\n", DEVNAME(sc), err ? "FAILED" : "ok", err);
++        } else
++            XYLog("%s: UX325 too many fatal errors in 10 minutes - device left stopped\n", DEVNAME(sc));
++    }
+     
+     //    rw_exit(&sc->ioctl_rwl);
+     splx(s);
+@@ -13243,9 +13288,16 @@ iwx_activate(struct iwx_softc *sc, int act)
+                       DEVNAME(sc));
+             break;
+         case DVACT_WAKEUP:
+-            /* Hardware should be up at this point. */
+-            if (iwx_set_hw_ready(sc))
+-                task_add(systq, &sc->init_task);
++            /*
++             * UX325: one 50 ms NIC_READY poll fails after a firmware crash, and then nothing
++             * started the card again (radio on did nothing). Always run init_task:
++             * iwx_init -> iwx_start_hw has the full sequence (prepare_card_hw retries, link power
++             * management off, SW reset, power gating for integrated CNVi parts).
++             */
++            if (!iwx_set_hw_ready(sc))
++                XYLog("%s: UX325 NIC not ready on wakeup - running the full start sequence\n",
++                      DEVNAME(sc));
++            task_add(systq, &sc->init_task);
+             break;
+     }
+     
+diff --git a/itlwm/itlwm.cpp b/itlwm/itlwm.cpp
+index 3f3a86c..38f45bd 100644
+--- a/itlwm/itlwm.cpp
++++ b/itlwm/itlwm.cpp
+@@ -22,6 +22,25 @@
+ #include <crypto/sha1.h>
+ #include <net80211/ieee80211_node.h>
+ #include <net80211/ieee80211_ioctl.h>
++// ---- UX325EA patches (ZenBook-UX325EA-Hackintosh) -----------------------------------------
++// Rate-limited IOLog for XYLog: at most 40 lines per 10 s reach the macOS log.
++extern "C" int xy_iolog_ok(void)
++{
++    static uint64_t windowStart;
++    static int count;
++    uint64_t ns;
++    uint64_t abst; clock_get_uptime(&abst); absolutetime_to_nanoseconds(abst, &ns);
++    if (ns - windowStart > 10ULL * 1000000000ULL) { windowStart = ns; count = 0; }
++    return ++count <= 40;
++}
++// Newer clang lowers memset(0) to __bzero, which the official 2.3.0 build never imported from the
++// kernel. Provide it privately (rep stosb cannot be turned back into a __bzero call).
++extern "C" __attribute__((visibility("hidden"))) void __bzero(void *s, size_t n)
++{
++    __asm__ volatile("rep stosb" : "+D"(s), "+c"(n) : "a"(0) : "memory");
++}
++// ---------------------------------------------------------------------------------------------
++
+ 
+ #define super IOEthernetController
+ OSDefineMetaClassAndStructors(itlwm, IOEthernetController)

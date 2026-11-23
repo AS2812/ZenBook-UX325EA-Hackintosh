@@ -1,4 +1,4 @@
-ZenBook UX325EA Hackintosh - v10.12 (2026-11-23)
+ZenBook UX325EA Hackintosh - v10.13 (2026-11-23)
 =================================================
 
 WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.0 + Wi-Fi package 2.2, 2026-11-23)

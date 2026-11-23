@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v2.2
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi: fix everything, permanent           v3.0
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 #
@@ -22,6 +22,10 @@
 #   v2.2: Wi-Fi package 2.3 (radio stopped cleanly before sleep and restarted with fresh firmware
 #         after every wake, faster recovery) and, at the end, the Wi-Fi recorder (wifi-log.sh)
 #         instead of the 3-minute lid check: it records until you press Enter.
+#   v3.0: Wi-Fi package 2.4 (alerts you when the card freezes and what to do, records whether a
+#         lid sleep revives it). A frozen card (driver missing) is called out with the only fix that
+#         resets it: Shut Down, NOT Restart. The speed test is optional (it can freeze the card) and
+#         reports a freeze under heavy use.
 # Network settings backup: /Users/Shared/UX325EA-Logs/network-backup-<time>/
 # Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt on the USB (+ /Users/Shared/UX325EA-Logs)
 # v1.x (AirportItlwm era) is in UX325EA-RESCUE/BACKUPS.
@@ -30,7 +34,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=2.2
+VERSION=3.0
 PKGID=local.zenbook.macos.wifi
 WC="/Library/Application Support/ZenBook Wi-Fi/WakeCheck"
 WAGENT=/Library/LaunchAgents/local.zenbook.wifi.wakecheck.plist
@@ -170,8 +174,11 @@ if [ -x "$WC" ] || [ "$DRY" = 1 ]; then
         || { [ "$DRY" = 1 ] && note "(dry) agent not checked" || bad "Wi-Fi recovery agent is not running"; }
 fi
 ITF="$(itl_if)"; [ "$DRY" = 1 ] && [ -n "${ZB_TEST_ITF:-}" ] && ITF="$ZB_TEST_ITF"
+FROZEN=0
 if [ -z "$ITF" ]; then
     if airport_loaded; then note "this start used AirportItlwm - the package switched the SSD to itlwm"
+    elif [ -n "$VI" ] && [ "$UPDATED" = 0 ]; then
+        FROZEN=1; bad "THE WI-FI CARD IS FROZEN: the itlwm driver did not start in this boot (a restart does not reset this card)"
     else note "the itlwm driver is not running in this start"; fi
     RESTART=1
 fi
@@ -283,8 +290,14 @@ fi
 # ---------------------------------------------------------------------------
 # 2c. Speed and signal (v2.1) - Apple's networkQuality on the Intel card only
 # ---------------------------------------------------------------------------
+SPEED=n
 if [ -n "$ITF" ] && [ -n "$(ipconfig getifaddr "$ITF" 2>/dev/null)" ]; then
-    echo ""; echo "--- 2c. speed test over the Intel card (about 30 seconds, uses ~100-300 MB)"
+    echo ""; echo "--- 2c. speed test (optional, about 30 seconds, ~100-300 MB). Heavy use has frozen this card"
+    echo "    before - if it freezes now, that is useful to know. Press Enter to run it, or s and Enter to skip: "
+    if [ "$DRY" = 1 ]; then A="${ZB_SPEED:-}"; else A=""; read -r A < /dev/tty; fi
+    [ "$(printf '%s' "$A" | cut -c1 | tr S s)" != s ] && SPEED=y
+fi
+if [ "$SPEED" = y ]; then
     J="$(networkQuality -I "$ITF" -s -c 2>/dev/null)"; DL="$(printf '%s' "$J" | nq_mbps dl_throughput)"; UL="$(printf '%s' "$J" | nq_mbps ul_throughput)"
     LINK="$(grep -o '[0-9.]* GHz, channel [0-9]*, [0-9]* MHz, signal -[0-9]* dBm[^.]*' "$UH/Library/Logs/ZenBook Wi-Fi/Last Wake.txt" 2>/dev/null | tail -1)"
     if [ -n "$DL" ]; then ok "download $DL Mbps, upload ${UL:-?} Mbps"; else bad "speed test did not finish"; fi
@@ -294,6 +307,11 @@ if [ -n "$ITF" ] && [ -n "$(ipconfig getifaddr "$ITF" 2>/dev/null)" ]; then
         note "signal $SIG dBm is WEAK (good is -65 or better): move closer to the router or put the router higher / more central."
     fi
     printf '%s' "$LINK" | grep -q "2.4 GHz" && note "2.4 GHz: this Intel card shares 2.4 GHz with Bluetooth - try Test Speed with Bluetooth off to compare."
+    sleep 10
+    L="$([ -x "$WC" ] && "$WC" --link 2>/dev/null)"
+    case "$L" in *"driver list: 0 networks"*|*"missing"*)
+        bad "THE CARD FROZE DURING THE SPEED TEST (heavy use): $L"; FROZEN=1; RESTART=1 ;;
+    *) echo "  after the test: $L" ;; esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -336,8 +354,9 @@ else ok "ZenBookHelper ${HVI:-?} is installed"; fi
 # ---------------------------------------------------------------------------
 echo ""
 if [ "$RESTART" = 1 ]; then
-    echo "=== RESTART NEEDED: eject the USB, restart (internal SSD), sign in, then run this script once"
-    echo "    more - it finishes the network part with the itlwm driver running."
+    echo "=== SHUT DOWN NEEDED: Apple menu > Shut Down (NOT Restart - a restart does not reset this Wi-Fi"
+    echo "    card). Wait 30 seconds, press the power button, sign in, then run this script once more."
+    [ "$FROZEN" = 1 ] && echo "    (The card froze. Next time it happens, first try: close the lid 15 seconds and open it.)"
 fi
 echo ""
 if [ "$FAILS" = 0 ] && [ "$RESTART" = 0 ]; then echo "=== DONE - all fixes saved on the SSD permanently (keep the USB in: the recorder copies its log there)."

@@ -1,5 +1,32 @@
-ZenBook UX325EA Hackintosh - v10.15 (2026-11-23)
+ZenBook UX325EA Hackintosh - v10.16 (2026-11-23)
 =================================================
+
+=====================================================================================
+WI-FI - FULL STEPS (fix-wifi.sh v3.0 + Wi-Fi package 2.4 + recorder wifi-log.sh v1.2)
+=====================================================================================
+WHAT IS WRONG (from your laptop's logs, 2026-11-23): the Intel AX201 card FREEZES - it suddenly
+hears ZERO networks, about 8-9 minutes after a lid wake (12:53:48 and 13:23:42) or under heavy use
+(the speed test at 15:34). A radio restart cannot revive it, and a normal Restart often cannot
+either (then Wi-Fi does not start at boot - 15:37). Only a real power-off resets it. The weak
+2.4 GHz signal (-70 to -88 dBm) and the old router make it worse.
+
+STEP 1  If Wi-Fi is dead or did not start: Apple menu > Shut Down (NOT Restart). Wait 30 s.
+        Press the power button.
+STEP 2  Sign in, plug in this USB, open Terminal and type:
+            sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
+        Type your password. At the speed test question type s and Enter (it can freeze the card).
+        It installs Wi-Fi package 2.4 and every fix, then the RECORDER starts by itself.
+STEP 3  Use the laptop normally. Close the lid 1 minute and open it. Then leave it 10+ minutes.
+        If the card freezes, a message pops up: first close the lid 15 seconds and open it;
+        if Wi-Fi is still dead, Shut Down (not Restart). The log records which one worked.
+STEP 4  Press Enter in Terminal to stop the recorder.
+STEP 5  Test B - Bluetooth OFF (Control Centre > Bluetooth off), then in Terminal:
+            sudo sh "/Volumes/Install macOS Sonoma/wifi-log.sh"
+        Repeat step 3, press Enter. (If Wi-Fi never freezes with Bluetooth off -> Bluetooth.)
+STEP 6  Bring the USB back. Logs: UX325EA-RESCUE/TEST-RESULTS/wifi-log-*.txt
+ROUTER  (big help, 192.168.1.1): Security WPA2-PSK with AES only, channel 1, 6 or 11 fixed
+        (not 12/13), width 20 MHz. Sit closer to the router if you can.
+=====================================================================================
 
 WHY WI-FI IS SLOW / LOST AFTER A MINUTE (found 2026-11-23 from the laptop's own log)
   1. HeliPort joins the FIRST saved network it can see, even a weak far-away one. The log shows

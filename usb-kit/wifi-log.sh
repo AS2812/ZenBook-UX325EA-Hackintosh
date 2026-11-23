@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi recorder: logs until you press Enter      v1.1
+# ASUS ZenBook 13 OLED (UX325EA) - Wi-Fi recorder: logs until you press Enter      v1.2
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-log.sh"
 #
@@ -9,6 +9,9 @@
 #   every 5 s : time, time since the last wake, internet, router reply, DNS, IP, HeliPort,
 #               screen, Bluetooth, battery/charger | Wi-Fi state, band, channel, signal, networks seen
 #   v1.1: Bluetooth on/off column (this card shares 2.4 GHz and the antenna with Bluetooth)
+#   v1.2: ignores keys typed before it started (v1.1 stopped at once), "idle" = seconds since the
+#         last key/trackpad use (the screen goes dark at 300 s on battery), Bluetooth read from
+#         system_profiler once a minute, a frozen card (driver missing) is called out
 #   outages   : start, how long after the wake, a snapshot at that moment, and how long it lasted
 #   beside it : the recovery agent's log (live) and driver / HeliPort / DHCP / sleep messages
 # Saved on the SSD (/Users/Shared/UX325EA-Logs) and copied to the USB every minute and at the end:
@@ -19,7 +22,7 @@ case ":${SHELLOPTS:-}:" in *:posix:*) exec /bin/bash "$0" "$@" ;; esac
 [ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 set -u
-VERSION=1.1
+VERSION=1.2
 DRY="${ZB_DRY:-0}"
 INTERVAL="${ZB_INTERVAL:-5}"
 if [ "$DRY" != 1 ] && [ "$(id -u)" -ne 0 ]; then
@@ -52,8 +55,11 @@ mins()   { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
 ksec()   { sysctl -n "$1" 2>/dev/null | sed -E 's/^[{] sec = ([0-9]+).*/\1/'; }
 screen() { local v; v="$(ioreg -n IODisplayWrangler -r -d 1 2>/dev/null | sed -n 's/.*"CurrentPowerState" = \([0-9]*\).*/\1/p' | head -1)"
            case "$v" in 4) echo on ;; [0-3]) echo off ;; *) echo "?" ;; esac; }
-bt()     { case "$(defaults read /Library/Preferences/com.apple.Bluetooth ControllerPowerState 2>/dev/null)" in
-               1) echo on ;; 0) echo off ;; *) echo "?" ;; esac; }
+BTSTATE="?"
+bt_refresh() { case "$(system_profiler SPBluetoothDataType 2>/dev/null | grep -m1 -E '^ *State:' | awk '{print $2}')" in
+                   On) BTSTATE=on ;; Off) BTSTATE=off ;; *) BTSTATE="?" ;; esac; }
+bt()     { echo "$BTSTATE"; }
+idle()   { ioreg -c IOHIDSystem -d 4 2>/dev/null | awk '/HIDIdleTime/ { printf "%ds", $NF / 1000000000; exit }'; }
 power()  { pmset -g batt 2>/dev/null | awk 'NR == 1 { src = ($0 ~ /AC Power/) ? "charger" : "battery" }
            NR == 2 { if (match($0, /[0-9]+%/)) pct = substr($0, RSTART, RLENGTH) } END { print src " " pct }'; }
 wifi()   { local o=""; [ -x "$WC" ] && o="$("$WC" --link 2>/dev/null)"; [ -z "$o" ] && [ -x "$WC" ] && o="$("$WC" --status 2>/dev/null)"
@@ -82,7 +88,10 @@ echo "HeliPort Auto Join order:"
     /"icmt"<blob>=/  { if (match($0, /"order": *-?[0-9]+/)) { v = substr($0, RSTART, RLENGTH); sub(/.*: */, "", v); ord = v }
                        if (match($0, /"autoJoin": *(true|false)/)) { v = substr($0, RSTART, RLENGTH); sub(/.*: */, "", v); aj = v } }
     END { flush() }' | sort -n | awk -F'\t' '{ printf "    %d. %-28s Auto Join %s\n", NR, $3, ($2 == "true" ? "ON" : "off") }'
-[ -n "$ITF" ] || echo "!!! the itlwm driver is not running in this start - recording anyway"
+if [ -z "$ITF" ]; then
+    echo "!!! THE WI-FI CARD DID NOT START (itlwm driver missing): it is frozen from before."
+    echo "!!! Fix: Apple menu > Shut Down (NOT Restart), wait 30 seconds, turn it on. Recording anyway."
+fi
 IF="${ITF:-en0}"
 
 # beside the main log: driver / HeliPort / DHCP / sleep messages from the system log
@@ -103,8 +112,10 @@ echo ""
 echo ">>> RECORDING. Use the laptop normally. Close / open the lid as often as you like."
 echo ">>> Press Enter to STOP (the summary and the log path are printed then)."
 echo ""
-echo "time      wake+   NET   router    DNS   IP               HeliPort  screen  BT   power        | Wi-Fi"
+echo "time      wake+   NET   router    DNS   IP               HeliPort  idle    BT   power        | Wi-Fi"
 BOOT="$(ksec kern.boottime)"; LASTWAKE="$(ksec kern.waketime)"; [ "${LASTWAKE:-0}" -gt 0 ] 2>/dev/null || LASTWAKE="$BOOT"
+bt_refresh
+[ "$DRY" != 1 ] && while read -t 0.3 -r _ < /dev/tty 2>/dev/null; do :; done   # drop keys typed before the start
 START="$(date +%s)"; N=0; OKN=0; WAKES=0; DOWN_SINCE=""; DOWN_AT=0; OUTAGES=""; NOUT=0; LONGEST=0
 while :; do
     NOW="$(date +%s)"
@@ -120,12 +131,12 @@ while :; do
     NET=DOWN; [ -n "$IP" ] && curl -s -m 3 --interface "$IF" -o /dev/null https://1.1.1.1/ 2>/dev/null && NET=ok
     DNS="-"; if [ "$NET" = ok ]; then curl -s -m 3 --interface "$IF" http://captive.apple.com/hotspot-detect.html 2>/dev/null | grep -q Success && DNS=ok || DNS=FAIL; fi
     HP=closed; pgrep -x HeliPort >/dev/null && HP=running
-    printf '%s  %-6s  %-4s  %-8s  %-4s  %-15s  %-8s  %-6s  %-3s  %-12s | %s\n' "$(date '+%H:%M:%S')" "$(mins "$SINCE")" "$NET" "$RT" "$DNS" "${IP:--}" "$HP" "$(screen)" "$(bt)" "$(power)" "$(wifi)"
+    printf '%s  %-6s  %-4s  %-8s  %-4s  %-15s  %-8s  %-6s  %-3s  %-12s | %s\n' "$(date '+%H:%M:%S')" "$(mins "$SINCE")" "$NET" "$RT" "$DNS" "${IP:--}" "$HP" "$(idle)" "$(bt)" "$(power)" "$(wifi)"
     agent_new
     N=$((N + 1)); [ "$NET" = ok ] && OKN=$((OKN + 1))
     if [ "$NET" != ok ] && [ -z "$DOWN_SINCE" ]; then
         DOWN_SINCE="$NOW"; DOWN_AT="$SINCE"
-        echo "!!!!!!!!!! OUTAGE START $(date '+%H:%M:%S') - $(mins "$SINCE") after the last wake - screen $(screen), Bluetooth $(bt) - snapshot:"
+        echo "!!!!!!!!!! OUTAGE START $(date '+%H:%M:%S') - $(mins "$SINCE") after the last wake - idle $(idle), Bluetooth $(bt) - snapshot:"
         ifconfig "$IF" 2>/dev/null | grep -E "status|inet |media" | mask | sed 's/^/      /'
         scutil --nwi 2>/dev/null | grep -E "flags|address|reach" | head -6 | sed 's/^/      /'
         netstat -rn -f inet 2>/dev/null | awk '$1 == "default"' | head -3 | sed 's/^/      route: /'
@@ -137,7 +148,7 @@ while :; do
         echo "========== BACK ONLINE after $(mins "$D") =========="
         DOWN_SINCE=""
     fi
-    [ $((N % 12)) = 0 ] && copy_usb
+    [ $((N % 12)) = 0 ] && { copy_usb; bt_refresh; }
     if [ "$DRY" = 1 ]; then
         [ $(( $(date +%s) - START )) -ge "${ZB_LOG_SECONDS:-30}" ] && break; sleep "$INTERVAL"
     elif read -t "$INTERVAL" -r _ < /dev/tty; then break; fi

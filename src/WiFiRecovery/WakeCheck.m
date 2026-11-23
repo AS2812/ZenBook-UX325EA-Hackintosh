@@ -370,6 +370,22 @@ static void openClient(void) {
     [NSWorkspace.sharedWorkspace openApplicationAtURL:[NSURL fileURLWithPath:clientPath]
         configuration:config completionHandler:nil];
 }
+// 2.4: tell the user when the card is frozen - a frozen AX201 needs the lid (sleep) or a real
+// Shut Down (power off); a restart does not always reset it.
+static void notifyUser(NSString *title, NSString *text) {
+    NSTask *t = [NSTask new];
+    t.executableURL = [NSURL fileURLWithPath:@"/usr/bin/osascript"];
+    t.arguments = @[@"-e", [NSString stringWithFormat:@"display alert \"%@\" message \"%@\"", title, text]];
+    t.standardOutput = t.standardError = NSFileHandle.fileHandleWithNullDevice;
+    [t launchAndReturnError:NULL];
+}
+static BOOL hasService(const char *cls) {
+    io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(cls));
+    if (svc) IOObjectRelease(svc);
+    return svc != IO_OBJECT_NULL;
+}
+static NSString *const frozenText = @"The Intel Wi-Fi card stopped hearing any network and a radio restart did not revive it. Close the lid for 15 seconds, then open it. If Wi-Fi is still gone: Apple menu > Shut Down (NOT Restart), wait 30 seconds, turn the laptop on.";
+static NSString *const missingText = @"The Intel Wi-Fi card did not start (it is still frozen from before). Apple menu > Shut Down (NOT Restart), wait 30 seconds, then turn the laptop on again.";
 @interface Monitor : NSObject
 - (void)begin:(NSString *)event;
 - (void)tick;
@@ -384,6 +400,8 @@ static void openClient(void) {
     double _lastLog;
     NSURL *_log, *_request;
     NSUserDefaults *_prefs;
+    double _missingSince;
+    BOOL _missingNotified, _frozen, _frozenNotified, _checkAfterWake;
 }
 - (instancetype)init {
     if ((self = [super init])) {
@@ -419,6 +437,7 @@ static void openClient(void) {
         (!joined && [_prefs objectForKey:@"LastReachableRouter"]))
         _policy.wasJoined = true;
     _wantOn = [_prefs boolForKey:@"LastRadioOn"];
+    _frozenNotified = NO;
     [self record:event];
 }
 - (void)tick {
@@ -473,6 +492,25 @@ static void openClient(void) {
         [self record:[NSString stringWithFormat:@"+%.0f s  %@ %@", now - _policy.epoch, status, linkDetails(s)]];
         _previous = status; _lastLog = now;
     }
+    // 2.4: driver missing for a minute (not AirportItlwm) = card frozen since before this start
+    if (s.state == Missing && !hasService("AirportItlwm")) {
+        if (!_missingSince) _missingSince = now;
+        if (now - _missingSince >= 60 && !_missingNotified) {
+            _missingNotified = YES;
+            [self record:@"FROZEN: the itlwm driver did not start - Shut Down (not Restart) resets the card"];
+            notifyUser(@"Wi-Fi card did not start", missingText);
+        }
+    } else { _missingSince = 0; }
+    // 2.4: was the card frozen before this sleep? record whether the lid revived it
+    if (_checkAfterWake && now - _policy.epoch >= 30) {
+        _checkAfterWake = NO;
+        BOOL alive = s.state >= Joining || (s.state == Searching && s.scan == ScanVisible);
+        [self record:alive ? @"LID RESET WORKED: the card was frozen before the sleep and hears networks again"
+                           : @"LID RESET DID NOT WORK: the card is still frozen after the sleep - Shut Down (not Restart) needed"];
+        if (alive) _frozen = NO;
+        else notifyUser(@"Wi-Fi card is still frozen", missingText);
+    }
+    if (s.state >= Joining) _frozen = NO;
     // Finish a reset interrupted between off and on, including across agent restarts.
     NSDate *pending = [_prefs objectForKey:@"PendingOnUntil"];
     BOOL finish = pending && pending.timeIntervalSinceNow > 0 && s.state == RadioOff;
@@ -507,6 +545,11 @@ static void openClient(void) {
                     break;
                 }
                 if (stillEmpty) [self record:[NSString stringWithFormat:@"Intel scan list stayed empty while disconnected for %d seconds; restarting the radio (%d of %d)", EmptyScanSeconds, _policy.cycles, MaxCycles]];
+                if (stillEmpty && _policy.cycles >= 2) {
+                    _frozen = YES;
+                    [self record:@"FROZEN: still no networks after a radio restart - the card needs the lid (sleep) or a Shut Down"];
+                    if (!_frozenNotified) { _frozenNotified = YES; notifyUser(@"Wi-Fi card froze", frozenText); }
+                }
                 else [self record:[NSString stringWithFormat:@"Router silent, no packets for %d seconds; restarting the radio (%d of %d)", StallSeconds, _policy.cycles, MaxCycles]];
             }
             [_prefs setObject:[NSDate dateWithTimeIntervalSinceNow:120] forKey:@"PendingOnUntil"];
@@ -537,6 +580,7 @@ static void openClient(void) {
 - (void)resumeAfterSleep:(NSString *)event {
     BOOL restart = [[_prefs objectForKey:@"OffForSleep"] boolValue];
     [_prefs removeObjectForKey:@"OffForSleep"];
+    _checkAfterWake = _frozen;
     [self begin:event];
     if (restart && snapshot().state == RadioOff) {
         [NSThread sleepForTimeInterval:1];
@@ -662,7 +706,7 @@ static void showReport(void) {
     if ([panel runModal] != NSModalResponseOK) return;
     NSString *speed = [NSString stringWithContentsOfURL:homePath(@"Library/Logs/ZenBook Wi-Fi/Speed Test.txt")
         encoding:NSUTF8StringEncoding error:NULL];
-    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.3\n\n%@\n\n%@",
+    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.4\n\n%@\n\n%@",
         speed ?: @"No speed test recorded.", wake];
     NSError *error = nil;
     if (![report writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:&error])

@@ -3,6 +3,19 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.16 — 2026-11-23 · the AX201 freeze: detect it, say what to do, record the cure
+
+- Laptop logs show the real failure: the AX201 suddenly hears **zero networks** about 8–9 minutes after
+  a wake (+502 s, +525 s) or under heavy traffic; a full radio restart (stop + firmware init) does not
+  revive it, and a warm restart sometimes leaves the driver unable to attach at boot. Only a power-off
+  reset it.
+- **Wi-Fi package 2.4** — the agent recognises the freeze (still no networks after a radio restart) and
+  pops up what to do (lid 15 s, otherwise Shut Down — not Restart); warns at login when the driver
+  did not start; records whether a lid sleep revived a frozen card.
+- **`fix-wifi.sh` 3.0** — calls out a frozen card, asks for Shut Down instead of Restart, makes the
+  speed test optional and reports a freeze under load. **`wifi-log.sh` 1.2** — ignores keys typed
+  before it started, shows idle time and Bluetooth state.
+
 ## v10.15 — 2026-11-23 · fresh Wi-Fi firmware after every wake, and a recorder
 
 - **Wi-Fi package 2.3** — itlwm's own sleep/wake handler only acknowledges power changes and never

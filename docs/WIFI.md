@@ -113,6 +113,23 @@ Sources: [itlwm FAQ](https://openintelwireless.github.io/itlwm/FAQ.html) ·
 [itlwm releases](https://github.com/OpenIntelWireless/itlwm/releases) ·
 [Notebookcheck UX325EA review (Windows iperf3)](https://www.notebookcheck.net/Asus-ZenBook-13-laptop-review-Core-i7-1165G7-versus-Ryzen-7-5800U-Which-one-is-the-better-ZenBook.540357.0.html)
 
+## 7. The freeze (2026-11-23 logs)
+
+| Time (UTC) | What the agent saw |
+|---|---|
+| 12:45:03 | wake, joined in 15 s, working at -74 … -82 dBm |
+| 12:53:48 (+525 s) | radio on, **driver list empty** |
+| 12:54:49 | radio restart (full stop + firmware init) → **still empty**; recovered only after a reboot |
+| 13:15:21 → 13:23:42 (+502 s) | the same pattern again |
+| 13:34 | froze during a speed test (upload phase), ~1 minute after boot |
+| 13:37 | after a quick restart the itlwm driver **did not attach at all** |
+
+itlwm itself reports `power on` throughout, because its power state is taken from the interface
+flags, so the agent judges by the scan list. Intel's own forum has AX201 reports of drops every
+5–10 minutes on Wi-Fi 4/5 routers and of a card that only worked again after a power-off. Package
+2.4 detects the freeze, tells the user to close the lid for 15 s or **Shut Down (not Restart)**, and logs
+whether the lid revived it; `wifi-log.sh` with Bluetooth on vs off isolates the trigger.
+
 ## Checking it yourself
 
 ```sh

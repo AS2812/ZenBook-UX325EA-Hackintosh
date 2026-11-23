@@ -3,6 +3,17 @@
 All notable changes to this setup. Versions follow the USB kit (`usb-kit/README.txt` has the
 full, step-by-step log of every test).
 
+## v10.13 — 2026-11-23 · one command for Wi-Fi, no more "!" icons
+
+- **`fix-wifi.sh` 2.0** — installs / updates the Wi-Fi package and its jobs, gives the Intel
+  card an enabled DHCP service "Intel Wi-Fi" first in the order, renews DHCP, falls back to
+  public DNS only when the router's DNS fails, checks reachability exactly like HeliPort,
+  hides the macOS Wi-Fi icon (it cannot work with itlwm), sleep timers, optional lid check.
+- **Wi-Fi package 2.2** — the recovery agent matches network services by interface type as
+  well as BSD name, so the leftover AirportItlwm "Wi-Fi" service no longer hides a missing
+  Intel service.
+- `wifi-driver.sh` 1.1 — hides the macOS Wi-Fi icon for itlwm and restores it for AirportItlwm.
+
 ## v10.12 — 2026-11-23 · Wi-Fi recovery 2.1 and a speed test
 
 - **Empty network list after the lid:** when Wi-Fi worked before, the radio is on and itlwm's

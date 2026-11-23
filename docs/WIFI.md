@@ -82,6 +82,18 @@ then picks the band. The installer also removes the itlwm troubleshooting switch
 
 Source, policy tests and the profile updater: [src/WiFiRecovery](../src/WiFiRecovery).
 
+## 5. The two "!" icons (Wi-Fi 2.2, `fix-wifi.sh` 2.0)
+
+| Icon | Meaning | Fix |
+|---|---|---|
+| HeliPort "!" | joined, but `captive.apple.com` is not reachable for macOS (HeliPort's own rule) — no service, no IP or no DNS on the Intel card | `fix-wifi.sh`: own DHCP service "Intel Wi-Fi", first in the order; DHCP renew; public DNS only if the router's DNS fails |
+| macOS Wi-Fi "!" | itlwm is an Ethernet-type interface, macOS has no Wi-Fi card to show | hidden from the menu bar; `wifi-driver.sh airport` shows it again |
+
+The old "Wi-Fi" service from AirportItlwm keeps the same BSD name (`en0`) but is bound to an
+802.11 interface type. Agent 2.1 matched services by BSD name only, so it could take that
+leftover service for the Intel card's and never create the missing one. 2.2 also compares
+the interface type, so the root DHCP job re-creates a missing service by itself.
+
 ## Checking it yourself
 
 ```sh

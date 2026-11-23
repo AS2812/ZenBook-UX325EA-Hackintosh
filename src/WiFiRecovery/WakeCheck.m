@@ -69,17 +69,32 @@ static ScanState cachedScan(io_connect_t c) {
     return r == KERN_SUCCESS && n == sizeof(entry) ? ScanVisible : ScanUnknown;
 }
 
+// itlwm presents an Ethernet interface. A "Wi-Fi" service left over from AirportItlwm can
+// carry the same BSD name; only a service of the live interface's type configures the adapter.
+static NSString *liveType(NSString *bsd) {
+    NSArray *interfaces = CFBridgingRelease(SCNetworkInterfaceCopyAll());
+    for (id item in interfaces) {
+        SCNetworkInterfaceRef iface = (__bridge SCNetworkInterfaceRef)item;
+        if ([bsd isEqual:(__bridge NSString *)SCNetworkInterfaceGetBSDName(iface)])
+            return [(__bridge NSString *)SCNetworkInterfaceGetInterfaceType(iface) copy];
+    }
+    return nil;
+}
+static BOOL serves(SCNetworkServiceRef service, NSString *bsd, NSString *type) {
+    SCNetworkInterfaceRef iface = SCNetworkServiceGetInterface(service);
+    return iface && [bsd isEqual:(__bridge NSString *)SCNetworkInterfaceGetBSDName(iface)] &&
+        (!type || [type isEqual:(__bridge NSString *)SCNetworkInterfaceGetInterfaceType(iface)]);
+}
 static SCNetworkServiceRef copyService(NSString *bsd) CF_RETURNS_RETAINED;
 static SCNetworkServiceRef copyService(NSString *bsd) {
     SCPreferencesRef prefs = SCPreferencesCreate(NULL, CFSTR("ZenBook Wi-Fi"), NULL);
     SCNetworkSetRef set = prefs ? SCNetworkSetCopyCurrent(prefs) : NULL;
     NSArray *services = set ? CFBridgingRelease(SCNetworkSetCopyServices(set)) : nil;
+    NSString *type = liveType(bsd);
     SCNetworkServiceRef selected = NULL;
     for (id item in services) {
         SCNetworkServiceRef service = (__bridge SCNetworkServiceRef)item;
-        SCNetworkInterfaceRef interface = SCNetworkServiceGetInterface(service);
-        if (interface && SCNetworkServiceGetEnabled(service) &&
-            [bsd isEqual:(__bridge NSString *)SCNetworkInterfaceGetBSDName(interface)]) {
+        if (SCNetworkServiceGetEnabled(service) && serves(service, bsd, type)) {
             selected = (SCNetworkServiceRef)CFRetain(service); break;
         }
     }
@@ -221,10 +236,9 @@ static BOOL restoreMissingService(NSString *bsd) {
     SCNetworkSetRef set = SCNetworkSetCopyCurrent(prefs);
     BOOL exists = NO, result = NO;
     NSArray *services = set ? CFBridgingRelease(SCNetworkSetCopyServices(set)) : nil;
-    for (id item in services) {
-        SCNetworkInterfaceRef iface = SCNetworkServiceGetInterface((__bridge SCNetworkServiceRef)item);
-        if (iface && [bsd isEqual:(__bridge NSString *)SCNetworkInterfaceGetBSDName(iface)]) exists = YES;
-    }
+    NSString *type = liveType(bsd);
+    for (id item in services)
+        if (serves((__bridge SCNetworkServiceRef)item, bsd, type)) exists = YES;
     if (set && !exists) {
         NSArray *interfaces = CFBridgingRelease(SCNetworkInterfaceCopyAll());
         for (id item in interfaces) {
@@ -590,7 +604,7 @@ static void showReport(void) {
     if ([panel runModal] != NSModalResponseOK) return;
     NSString *speed = [NSString stringWithContentsOfURL:homePath(@"Library/Logs/ZenBook Wi-Fi/Speed Test.txt")
         encoding:NSUTF8StringEncoding error:NULL];
-    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.1\n\n%@\n\n%@",
+    NSString *report = [NSString stringWithFormat:@"ZenBook Wi-Fi 2.2\n\n%@\n\n%@",
         speed ?: @"No speed test recorded.", wake];
     NSError *error = nil;
     if (![report writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:&error])

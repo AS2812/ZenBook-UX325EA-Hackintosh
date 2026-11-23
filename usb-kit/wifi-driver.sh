@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# ASUS ZenBook 13 OLED (UX325EA) - choose the Wi-Fi driver                   v1.0
+# ASUS ZenBook 13 OLED (UX325EA) - choose the Wi-Fi driver                   v1.1
 #
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" itlwm     STABLE: itlwm + HeliPort
 #   sudo sh "/Volumes/Install macOS Sonoma/wifi-driver.sh" airport   back to AirportItlwm
@@ -15,6 +15,8 @@
 #   - Kernel > Add: itlwm.kext on / AirportItlwm.kext off (or the reverse) in every config*.plist
 #   - itlwm.kext: removes the author's sample networks (one was an OPEN network called "Redmi")
 #   - itlwm mode: installs /Applications/HeliPort.app and starts it at every login
+#   - v1.1: itlwm hides the macOS Wi-Fi icon (with itlwm macOS sees no Wi-Fi card, the icon only
+#     shows "!"); airport shows it again
 # Backups: /Users/Shared/UX325EA-EFI-Backups/wifi-driver-<time>/  Log: TEST-RESULTS/wifi-driver-<time>.txt
 # Test only: ZB_TEST_ESPS="dir1|dir2" ZB_TEST_APPS=dir ZB_TEST_HOME=dir (no root, no disks)
 # ==============================================================================
@@ -42,7 +44,7 @@ ok()   { echo "  [OK]   $*"; }
 fail() { echo ""; echo "[ERROR] $*"; echo "        Nothing more was changed. Log: $LOG"; exit 1; }
 pinfo() { diskutil info -plist "$1" 2>/dev/null | plutil -extract "$2" raw -o - - 2>/dev/null; }
 PB=/usr/libexec/PlistBuddy
-echo "=== ZenBook UX325EA - Wi-Fi driver v1.0 ($TS) mode: $MODE  user: $U"
+echo "=== ZenBook UX325EA - Wi-Fi driver v1.1 ($TS) mode: $MODE  user: $U"
 
 # ---------------------------------------------------------------------------
 # 1. The two EFI partitions: internal SSD (starts the laptop) and this USB
@@ -129,6 +131,17 @@ EOF
     plutil -lint "$AGENT" >/dev/null && ok "HeliPort 1.5.0 installed in $APPS, starts at every login" || fail "login item for HeliPort is broken"
 elif [ "$MODE" = airport ] && [ -f "$AGENT" ]; then
     rm -f "$AGENT" && ok "HeliPort no longer starts at login (the app stays in $APPS)"
+fi
+# v1.1: macOS Wi-Fi icon - hidden with itlwm (no Wi-Fi card for macOS), back with AirportItlwm
+asu() { if [ "$TEST" = 0 ]; then launchctl asuser "$(id -u "$U")" sudo -u "$U" -H "$@"; else echo "  (test) $*"; fi; }
+if [ "$MODE" = itlwm ]; then
+    asu defaults -currentHost write com.apple.controlcenter WiFi -int 8
+    asu defaults write com.apple.controlcenter "NSStatusItem Visible WiFi" -bool false
+    asu killall ControlCenter 2>/dev/null; ok "macOS Wi-Fi icon hidden (with itlwm it can only show \"!\") - HeliPort is the Wi-Fi menu"
+elif [ "$MODE" = airport ]; then
+    asu defaults -currentHost delete com.apple.controlcenter WiFi 2>/dev/null
+    asu defaults delete com.apple.controlcenter "NSStatusItem Visible WiFi" 2>/dev/null
+    asu killall ControlCenter 2>/dev/null; ok "macOS Wi-Fi icon back in the menu bar"
 fi
 # ---------------------------------------------------------------------------
 # 4. ZenBookHelper from this USB (8.23 knows itlwm; the same steps as fix-hardware/fix-wifi)

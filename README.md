@@ -190,7 +190,7 @@ Everything in [`usb-kit/`](usb-kit) runs from the USB's data partition.
 | `sync-efi-to-ssd.sh` | copies the tested EFI to the internal SSD, verified byte for byte, never touches `\EFI\Microsoft` |
 | `make-mac-only.sh` | removes Windows and gives macOS the whole SSD (check mode by default) |
 | `wifi-driver.sh` | switches **itlwm + HeliPort** ⇄ **AirportItlwm** on the SSD's and the USB's EFI, with backups |
-| `fix-wifi.sh` | sleep settings (no idle sleep 2 min after the lid), helper update, automatic lid check |
+| `fix-wifi.sh` | **one command for Wi-Fi**: installs the Wi-Fi package, gives the Intel card a working network service (clears HeliPort's "!"), hides the unusable macOS Wi-Fi icon, sleep timers, optional lid check |
 | `zenbook-status.sh` | read-only report: Wi-Fi driver and debug flags on the SSD, helper, Wi-Fi, CPU and memory |
 | `Install ZenBook Wi-Fi.pkg` | itlwm + HeliPort, Wi-Fi recovery agent and **ZenBook Wi-Fi Repair** (speed test, report, reconnect) — source in `src/WiFiRecovery` |
 | `ZenBookHelper.app` | power button, mute, NumberPad, speaker amplifier, Delete key, Wi-Fi watchdog (`wifiprobe`) |
@@ -238,12 +238,29 @@ System Settings → General → Startup Disk → macOS → Restart.
 
 <br>
 
-Run `sudo sh "/Volumes/<USB>/fix-wifi.sh"` once: it stops the battery idle sleep that switched
-Wi-Fi off two minutes after the lid was opened, updates the helper and runs a hands-off lid
-check. Every wake is then logged as `after wake +60/120/180 s: Wi-Fi working / NOT working`.
-With itlwm, the Wi-Fi installer's recovery agent restarts the radio if the network list stays
+Run `sudo sh "/Volumes/<USB>/fix-wifi.sh"` once: it installs the Wi-Fi package, stops the
+battery idle sleep that switched Wi-Fi off two minutes after the lid was opened and offers a
+hands-off lid check. The package's recovery agent restarts the radio if the network list stays
 empty for a minute; **ZenBook Wi-Fi Repair → Show Report** saves the wake history.
 Details in [docs/WIFI.md](docs/WIFI.md).
+
+</details>
+
+<details>
+<summary><b>A "!" on the Wi-Fi icons</b></summary>
+
+<br>
+
+- **HeliPort "!"** — HeliPort is joined to the router, but macOS has no internet path on the
+  Intel card: no network service, no IP address or no DNS. Typical after switching from
+  AirportItlwm, whose old "Wi-Fi" service does not apply to itlwm's Ethernet-type interface.
+- **macOS Wi-Fi icon "!"** — with itlwm macOS sees no Wi-Fi card at all, so this icon can never
+  work. HeliPort is the Wi-Fi menu.
+
+`sudo sh "/Volumes/<USB>/fix-wifi.sh"` gives the card its own DHCP service "Intel Wi-Fi" (first in
+the order), renews the address, falls back to public DNS only if the router's DNS fails, hides
+the macOS icon and then runs HeliPort's own reachability check. `wifi-driver.sh airport`
+brings the macOS icon back.
 
 </details>
 

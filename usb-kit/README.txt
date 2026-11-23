@@ -1,22 +1,48 @@
-ZenBook UX325EA Hackintosh - v10.10 (2026-11-21)
+ZenBook UX325EA Hackintosh - v10.12 (2026-11-23)
 =================================================
 
-Wi-Fi on macOS — HeliPort and itlwm (2026-11-22)
+WI-FI: FIX EVERYTHING - ONE COMMAND (fix-wifi.sh v2.0 + Wi-Fi package 2.2, 2026-11-23)
 
-The USB now boots the Intel AX201 with itlwm 2.3.0. To keep this setup on
-the internal SSD, sign in to macOS, open Install ZenBook Wi-Fi.pkg on this
-USB in Finder, and finish Installer. Eject the USB and restart from the SSD.
-HeliPort opens at login. Pick your network, save the password and enable
-Auto Join. Use the HeliPort icon for Wi-Fi. The Apple Wi-Fi menu and
-Wi-Fi-based Location Services are unavailable with this driver.
+  Sign in to macOS, plug in this USB, open Terminal and type:
 
-After you close and reopen the lid, the laptop records five minutes of local
-router checks. Open ~/Library/Logs/ZenBook Wi-Fi/Last Wake.txt in Finder.
+      sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"
 
+  It installs/updates the Wi-Fi package, fixes HeliPort's "!" and hides the macOS Wi-Fi
+  icon, sets the sleep timers, then offers a lid check. If it says RESTART NEEDED: restart from
+  the SSD and run it once more. Log: UX325EA-RESCUE/TEST-RESULTS/wifi-fix-<time>.txt
+
+  The two "!" icons:
+  - HeliPort "!" = joined to your router, but macOS has no internet path on the Intel card
+    (no network service, no IP address or no DNS). The script gives the card its own service
+    "Intel Wi-Fi" (DHCP, first in the order), renews the address, falls back to 1.1.1.1/8.8.8.8
+    DNS only if the router's DNS fails, then checks exactly like HeliPort does.
+  - macOS Wi-Fi icon "!" = with itlwm macOS sees no Wi-Fi card at all, so that icon can never
+    work. It is hidden; HeliPort is the Wi-Fi menu. (wifi-driver.sh airport brings it back.)
+  - Package 2.2: the recovery agent no longer mistakes the old "Wi-Fi" service from
+    AirportItlwm for the Intel card's service, so it can re-create a missing one by itself.
+
+New in 2.1:
+  - Empty network list after the lid: if Wi-Fi was working before, the radio is on, but the
+    driver's network list stays EMPTY for a full minute, the agent restarts the Intel radio once
+    (it re-checks right before). Next automatic restart only after the link recovers or a new
+    wake, and at least 10 minutes later. Networks visible = it leaves the radio alone.
+  - Speed test: Applications -> ZenBook Wi-Fi Repair -> Test Speed. Measures download and upload
+    over the Intel Wi-Fi (Apple's networkQuality) and shows band (2.4 / 5 GHz), channel, width
+    and signal. On 2.4 GHz it offers "Try 5 GHz" when the same network is visible strongly on
+    5 GHz. A router with a separate 5 GHz name: pick that name in HeliPort.
+  - The installer also removes -novht / -noht40 from the SSD's OpenCore profiles if present
+    (those switches cap the card at slow speeds). All five profiles are validated with ocvalidate.
+  - Show Report -> Save a Copy... saves wake log + latest speed test (choose this USB:
+    UX325EA-RESCUE/TEST-RESULTS).
+
+TEST (please): Test Speed near the router -> close the lid 10 minutes -> open, use Wi-Fi for
+10 minutes -> Test Speed again in the same spot -> Show Report -> Save a Copy... to this USB.
+Compare with a phone on the same Wi-Fi and band.
+Old 2.0 installer: kept on the Mac (~/zenbook_dsdt/backups/wifi-pkg-2.0), no room on this USB.
 
 Previous setup (2026-11-21 21:05): Wi-Fi stayed on AirportItlwm (macOS Wi-Fi menu + location by Wi-Fi).
   Its build is the correct one (= official AirportItlwm 2.3.0 "Sonoma 14.4+", checked byte for byte).
-  Run once:   sudo sh "/Volumes/Install macOS Sonoma/fix-wifi.sh"   -> Enter -> lid 1 minute -> hands off
+  (HISTORY - that was fix-wifi.sh v1.3; today's fix-wifi.sh is v2.0 above. v1.3: UX325EA-RESCUE/BACKUPS/pre-wifi22-*)
   It installs helper 8.24 (Wi-Fi really OFF during sleep, ON after wake - 8.22 had a bug) and records
   what macOS's Wi-Fi/location/Bluetooth services did if Wi-Fi drops again. 8.24 also writes
   "after wake +60/120/180 s: Wi-Fi working / NOT working" after EVERY lid open, by itself.
